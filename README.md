@@ -161,10 +161,17 @@ Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/ki
 
 ## Screenshots
 
-<!-- Replace the placeholders below with real screenshots -->
-| Dashboard | Signals | Whale tracker |
-|---|---|---|
-| _screenshot placeholder_ | _screenshot placeholder_ | _screenshot placeholder_ |
+**Portfolio overview** — open positions with their live ATR trailing stops and the strategies that produced each entry. The `[no claude confirm]` tag marks entries the LLM layer declined to endorse, so the provenance of every position stays visible.
+
+![Dashboard](docs/dashboard.png)
+
+**Whale tracker** — 13F filings parsed from SEC EDGAR, diffed against the previous quarter and resolved to tradeable tickers.
+
+![Whale tracker](docs/whales.png)
+
+**Signal log** — every combined signal with score, contributing strategies and reasoning, including the ones that never cleared the entry gate.
+
+![Signals](docs/signals.png)
 
 ## Safety
 
