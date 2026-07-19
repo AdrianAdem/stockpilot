@@ -1,75 +1,195 @@
 # StockPilot
 
-Fully autonomous stock trading bot for Alpaca Paper Trading. Combines technical analysis, whale tracking (13F filings), and Claude AI analysis to make trading decisions.
+Autonomous equity trading bot for Alpaca paper trading — combines technical strategies, 13F institutional filings and a two-tier LLM analysis layer behind a hard risk-management gate.
 
-**PAPER TRADING ONLY** — hardcoded safety check prevents live trading.
+> ⚠️ **Learning and research project. Paper/demo accounts only. Not investment advice.**
+> The client refuses to start against a live Alpaca endpoint (see [Safety](#safety)). Nothing here is a recommendation to buy or sell any security. Backtested performance says nothing about future results.
+
+## Problem
+
+Most hobby trading bots are a single indicator wired to a market order. That fails in two places: signal quality (one indicator is noise) and risk (nothing stops a position from growing until it dominates the portfolio).
+
+StockPilot separates those concerns. Four independent signal sources are merged into one weighted score, and every order then has to clear a risk layer that owns position sizing, sector exposure, drawdown limits and exits. A signal can be strong and still be rejected — that is intended behaviour, not a bug.
 
 ## Features
 
-- **3 Strategies**: Momentum, Mean Reversion, Whale Following
-- **Claude AI Analysis**: 2-tier (Haiku screening + Sonnet deep analysis)
-- **13F Whale Tracking**: Monitors Buffett, Dalio, Soros, Simons, Griffin, Ackman, Loeb, Tepper
-- **Risk Management**: Position sizing (Kelly + Fixed Fractional), sector limits, drawdown protection
-- **Trailing Stops**: Auto-adjusting stop-losses based on profit levels
-- **Telegram Notifications**: Trade alerts, daily summaries, error notifications
-- **FastAPI Dashboard**: Portfolio overview, positions, signals, whale tracker, API costs
-- **Backtesting**: Historical strategy testing with HTML reports
+- **Four signal sources, weighted** — momentum, mean reversion, 13F whale-following and an LLM analyst, merged into a single score with a configurable entry threshold.
+- **Two-tier LLM analysis** — Claude Haiku screens candidates cheaply; only survivors reach Claude Sonnet for full analysis (technicals + news + institutional flow + macro). A per-scan call budget caps token spend; the static system prompt is cached.
+- **13F institutional tracking** — parses SEC EDGAR filings for 8 funds (Berkshire Hathaway, Bridgewater, Soros, Renaissance Technologies, Citadel, Pershing Square, Third Point, Appaloosa), diffs consecutive quarters and resolves issuer names to tradeable tickers to build a buy-consensus signal.
+- **Hard risk layer** — per-position cap, max concurrent positions, GICS sector limits, minimum cash reserve, daily and weekly drawdown circuit breakers, and no averaging into an existing position.
+- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. Stops are real GTC orders at the broker, updated by atomic order replacement (no unprotected window). A reconciliation pass guarantees every open position is covered by exactly one full-size stop.
+- **Backtesting** — no-lookahead engine (signal on day *i* fills at day *i+1* open; stops checked against intraday lows), plus standalone harnesses that isolate exit models and position-sizing models for controlled A/B comparison.
+- **Operations** — FastAPI dashboard, Telegram notifications and remote control, structured JSON logging, per-call API cost tracking.
 
-## Setup
+## Tech stack
 
-```bash
-cp .env.example .env
-# Fill in API keys
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![asyncio](https://img.shields.io/badge/asyncio-fully%20async-3776AB)
+![pandas](https://img.shields.io/badge/pandas-2.x-150458?logo=pandas&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-dashboard-009688?logo=fastapi&logoColor=white)
+![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063)
+![SQLite](https://img.shields.io/badge/SQLite-aiosqlite-003B57?logo=sqlite&logoColor=white)
+![Claude](https://img.shields.io/badge/Claude-Haiku%20%2B%20Sonnet-D97757)
+![Alpaca](https://img.shields.io/badge/Alpaca-paper%20trading-FFD700)
+![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-pip install -r requirements.txt
-python -m main
-```
-
-## Docker
-
-```bash
-docker compose up -d
-```
-
-Dashboard: http://localhost:8000
+Fully async (`asyncio` + `httpx`). Technical indicators (RSI, MACD, Bollinger Bands, SMA 50/200, ATR, volume ratio) are implemented directly on pandas/numpy — no TA library dependency. Pydantic models for configuration and domain objects.
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph sources[Data sources]
+        AL[Alpaca<br/>bars, quotes, orders]
+        SEC[SEC EDGAR<br/>13F filings]
+        FRED[FRED<br/>macro series]
+        NEWS[News<br/>Alpaca + RSS]
+    end
+
+    subgraph signal[Signal generation]
+        TECH[Technical indicators<br/>RSI, MACD, Bollinger, SMA, ATR]
+        SCR[Screener<br/>liquidity + price filter]
+        MOM[Momentum]
+        MR[Mean reversion]
+        WF[Whale following]
+    end
+
+    subgraph ai[LLM analysis]
+        H[Tier 1: Haiku<br/>cheap screen]
+        S[Tier 2: Sonnet<br/>deep analysis]
+    end
+
+    COMB[Signal combiner<br/>weighted score]
+
+    subgraph risk[Risk layer]
+        SIZE[Position sizer<br/>conviction + Kelly cap]
+        PM[Portfolio manager<br/>sector, exposure, drawdown]
+    end
+
+    subgraph exec[Execution]
+        TR[Trader]
+        SL[Stop-loss manager<br/>ATR trailing]
+        OM[Order manager]
+    end
+
+    DB[(SQLite<br/>trades, signals, costs)]
+    UI[FastAPI dashboard]
+    TG[Telegram]
+
+    AL --> TECH --> SCR --> MOM & MR
+    SEC --> WF
+    MOM & MR & WF --> COMB
+    COMB -->|score above gate| H -->|tradeable| S --> COMB
+    NEWS & FRED --> S
+    COMB --> SIZE --> PM --> TR
+    TR --> AL
+    SL --> AL
+    OM --> AL
+    TR & SL --> DB --> UI
+    TR & SL --> TG
 ```
-main.py          → Orchestrator (15min loop during market hours)
-├── data/        → Alpaca, SEC EDGAR, technicals, news, FRED
-├── strategy/    → Momentum, Mean Reversion, Whale Follow
-├── analysis/    → Claude AI (2-tier), Signal Combiner, Screener
-├── risk/        → Position Sizing, Portfolio Manager, Stop-Loss
-├── execution/   → Trader, Order Manager, Telegram
-├── storage/     → SQLite + Pydantic Models
-├── backtest/    → Engine + HTML Report Generator
-└── dashboard/   → FastAPI + Jinja2 + Tailwind
+
+The main loop runs every 15 minutes while the market is open: reconcile broker-side exits → update trailing stops → evaluate time stops → risk check → screen universe → generate signals → size and execute.
+
+## Installation
+
+Requires Python 3.11+.
+
+```bash
+git clone https://github.com/AdrianAdem/stockpilot.git
+cd stockpilot
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env    # then fill in your keys
 ```
 
-## Telegram Commands
+### Environment variables
 
-- `/status` — Portfolio status
-- `/positions` — Open positions
-- `/history` — Recent trades
-- `/pause` — Pause trading
-- `/resume` — Resume trading
-- `/kill` — Close all positions
+All configuration lives in `.env`; no credentials are read from anywhere else.
 
-## API Keys Needed
+| Variable | Description |
+|---|---|
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | Alpaca **paper** trading credentials |
+| `ALPACA_BASE_URL` | Must be `https://paper-api.alpaca.markets` — the client rejects anything else |
+| `ANTHROPIC_API_KEY` | Claude API key |
+| `FRED_API_KEY` | FRED macro data (free) |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Notifications and remote control |
+| `SEC_USER_AGENT` | Contact string required by SEC EDGAR, e.g. `stockpilot you@example.com` |
 
-- **Alpaca** (free): https://alpaca.markets
-- **Anthropic**: https://console.anthropic.com
-- **FRED** (free): https://fred.stlouisfed.org/docs/api/api_key.html
-- **Telegram Bot**: https://t.me/BotFather
+Tuning knobs (defaults shipped in `.env.example`):
 
-## Risk Parameters
+| Variable | Default | Meaning |
+|---|---|---|
+| `MIN_SIGNAL_SCORE` | `0.65` | Combined score required to open a position |
+| `MAX_POSITION_PCT` / `MAX_POSITIONS` | `0.03` / `15` | Base position weight, max concurrent positions |
+| `MAX_SECTOR_PCT` / `MAX_PORTFOLIO_INVESTED` | `0.40` / `0.80` | Sector cap, minimum cash reserve |
+| `DAILY_DRAWDOWN_LIMIT` / `WEEKLY_DRAWDOWN_LIMIT` | `0.02` / `0.05` | Circuit breakers |
+| `ATR_INITIAL_STOP_FACTOR` / `ATR_TRAILING_FACTOR` | `2.0` / `2.5` | Stop distance in ATR multiples |
+| `SCREENER_MIN_VOLUME` / `SCREENER_MIN_PRICE` | `200000` / `5` | Liquidity filter (volume measured on the IEX feed) |
+| `MAX_CLAUDE_CALLS_PER_SCAN` | `12` | Token-cost ceiling per scan |
+| `MOMENTUM_WEIGHT` / `MEAN_REVERSION_WEIGHT` / `WHALE_FOLLOW_WEIGHT` / `CLAUDE_WEIGHT` | `0.30` / `0.25` / `0.25` / `0.20` | Signal blend |
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| MAX_POSITION_PCT | 3% | Max single position size |
-| MAX_SECTOR_PCT | 40% | Max sector exposure |
-| MAX_POSITIONS | 15 | Max concurrent positions |
-| DAILY_DRAWDOWN_LIMIT | 2% | Stops trading for the day |
-| WEEKLY_DRAWDOWN_LIMIT | 5% | Pauses bot entirely |
-| MIN_SIGNAL_SCORE | 0.6 | Minimum combined signal score |
+## Usage
+
+```bash
+# Run the bot (trades only while the US market is open)
+python -m main
+```
+
+Dashboard at `http://localhost:8000` — routes: `/` (portfolio), `/positions`, `/signals`, `/whales`, `/costs`, `/backtest`, `/logs`, plus `/api/equity-curve` and `/api/summary` as JSON.
+
+Docker:
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
+Backtesting:
+
+```bash
+# Compare exit models: fixed 2-stage vs ATR trailing at several factors
+python -m backtest.exit_compare
+
+# Compare position-sizing models: flat vs volatility-scaled
+python -m backtest.sizing_compare
+```
+
+Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/kill`.
+
+## Screenshots
+
+<!-- Replace the placeholders below with real screenshots -->
+| Dashboard | Signals | Whale tracker |
+|---|---|---|
+| _screenshot placeholder_ | _screenshot placeholder_ | _screenshot placeholder_ |
+
+## Safety
+
+- `AlpacaClient` raises on construction if `ALPACA_BASE_URL` is not the paper endpoint; `verify_paper_account()` runs at startup.
+- Drawdown breakers halt new entries for the day (−2%) and pause the bot entirely for the week (−5%).
+- Graceful shutdown cancels all open orders on `SIGINT`/`SIGTERM`.
+- `.env`, logs and the SQLite database are gitignored; no credentials are committed.
+
+## Project layout
+
+```
+config/      settings, S&P 500 universe + GICS sectors, strategy parameters
+data/        Alpaca client, SEC 13F parser, indicators, news, FRED
+strategy/    momentum, mean reversion, whale following (Strategy ABC)
+analysis/    Claude analyst (2-tier), signal combiner, screener, whale tracker
+risk/        position sizer, portfolio manager, ATR stop-loss manager
+execution/   trader, order manager, Telegram notifier + command handler
+storage/     aiosqlite database, Pydantic models
+backtest/    no-lookahead engine, exit and sizing comparison harnesses
+dashboard/   FastAPI app + Jinja2 templates
+```
+
+## Disclaimer
+
+This is a personal learning and research project. It runs against **paper/demo accounts only** and is not intended or suitable for live trading. It is **not investment advice** and not a recommendation to buy or sell any security. Backtest results are historical simulations built on modelling assumptions and do not predict future performance. Use at your own risk.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
