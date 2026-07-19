@@ -119,11 +119,19 @@ class SECFilingsClient:
                 shares_el = info.find(f".//{ns}sshPrnamt")
 
                 if name_el is not None and cusip_el is not None:
+                    # Since the 2023 Form 13F amendments, <value> is reported in
+                    # whole dollars (it used to be thousands). Sanity-check the
+                    # implied per-share price and only scale up for legacy filings.
+                    raw_value = int(value_el.text or "0")
+                    shares = int(shares_el.text or "0") if shares_el is not None else 0
+                    value = raw_value
+                    if shares > 0 and raw_value / shares < 1.0:
+                        value = raw_value * 1000  # legacy filing reported in thousands
                     holdings.append({
                         "name": name_el.text or "",
                         "cusip": cusip_el.text or "",
-                        "value": int(value_el.text or "0") * 1000,  # reported in thousands
-                        "shares": int(shares_el.text or "0") if shares_el is not None else 0,
+                        "value": value,
+                        "shares": shares,
                     })
         except ET.ParseError as e:
             logger.error("xml_parse_error", error=str(e))
