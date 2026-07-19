@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Backtest{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Backtest Reports</h1>
+<div class="bg-slate-800 rounded-lg overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-slate-700">
+            <tr>
+                <th class="px-4 py-2 text-left">Report</th>
+                <th class="px-4 py-2 text-right">Size</th>
+                <th class="px-4 py-2 text-right">Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in reports %}
+            <tr class="border-t border-slate-700">
+                <td class="px-4 py-2 font-medium text-primary">{{ r.name }}</td>
+                <td class="px-4 py-2 text-right text-slate-400">{{ "%.1f"|format(r.size / 1024) }} KB</td>
+                <td class="px-4 py-2 text-right">
+                    <a href="/backtest/{{ r.path }}" target="_blank" class="text-primary hover:underline">Open</a>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not reports %}
+            <tr><td colspan="3" class="px-4 py-8 text-center text-slate-500">No backtest reports yet. Run a backtest to generate one.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

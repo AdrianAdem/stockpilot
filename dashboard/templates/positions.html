@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Positions{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Open Positions</h1>
+<div class="bg-slate-800 rounded-lg overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-slate-700">
+            <tr>
+                <th class="px-4 py-2 text-left">Symbol</th>
+                <th class="px-4 py-2 text-left">Side</th>
+                <th class="px-4 py-2 text-right">Qty</th>
+                <th class="px-4 py-2 text-right">Entry Price</th>
+                <th class="px-4 py-2 text-right">Stop Loss</th>
+                <th class="px-4 py-2 text-right">Take Profit</th>
+                <th class="px-4 py-2 text-right">Score</th>
+                <th class="px-4 py-2 text-left">Strategy</th>
+                <th class="px-4 py-2 text-left">Date</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in trades %}
+            <tr class="border-t border-slate-700 hover:bg-slate-750">
+                <td class="px-4 py-2 font-medium text-primary">{{ t.symbol }}</td>
+                <td class="px-4 py-2">
+                    <span class="px-2 py-0.5 rounded text-xs {% if t.side == 'BUY' %}bg-green-900 text-green-300{% else %}bg-red-900 text-red-300{% endif %}">
+                        {{ t.side }}
+                    </span>
+                </td>
+                <td class="px-4 py-2 text-right">{{ t.qty }}</td>
+                <td class="px-4 py-2 text-right">${{ "%.2f"|format(t.price) }}</td>
+                <td class="px-4 py-2 text-right text-red-400">{{ "$%.2f"|format(t.stop_loss) if t.stop_loss else "-" }}</td>
+                <td class="px-4 py-2 text-right text-green-400">{{ "$%.2f"|format(t.take_profit) if t.take_profit else "-" }}</td>
+                <td class="px-4 py-2 text-right">{{ "%.2f"|format(t.signal_score) }}</td>
+                <td class="px-4 py-2 text-slate-400 text-sm">{{ t.strategy }}</td>
+                <td class="px-4 py-2 text-slate-400 text-sm">{{ t.timestamp.strftime('%Y-%m-%d') }}</td>
+            </tr>
+            {% endfor %}
+            {% if not trades %}
+            <tr><td colspan="9" class="px-4 py-8 text-center text-slate-500">No open positions</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

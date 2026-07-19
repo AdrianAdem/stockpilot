@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Whale Tracker{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Whale Tracker (13F Filings)</h1>
+<p class="text-slate-400 mb-4">Tracking: Berkshire Hathaway, Bridgewater, Soros, Renaissance, Citadel, Pershing Square, Third Point, Appaloosa</p>
+<div class="bg-slate-800 rounded-lg overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-slate-700">
+            <tr>
+                <th class="px-4 py-2 text-left">Fund</th>
+                <th class="px-4 py-2 text-left">Symbol</th>
+                <th class="px-4 py-2 text-left">Change</th>
+                <th class="px-4 py-2 text-right">Shares</th>
+                <th class="px-4 py-2 text-right">Value</th>
+                <th class="px-4 py-2 text-right">Change %</th>
+                <th class="px-4 py-2 text-left">Filing Date</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for h in holdings %}
+            <tr class="border-t border-slate-700">
+                <td class="px-4 py-2 text-sm">{{ h.fund_name }}</td>
+                <td class="px-4 py-2 font-medium text-primary">{{ h.symbol }}</td>
+                <td class="px-4 py-2">
+                    <span class="px-2 py-0.5 rounded text-xs
+                        {% if h.change_type == 'NEW' %}bg-blue-900 text-blue-300
+                        {% elif h.change_type == 'INCREASED' %}bg-green-900 text-green-300
+                        {% elif h.change_type == 'DECREASED' %}bg-orange-900 text-orange-300
+                        {% elif h.change_type == 'SOLD' %}bg-red-900 text-red-300
+                        {% else %}bg-slate-700 text-slate-300{% endif %}">
+                        {{ h.change_type }}
+                    </span>
+                </td>
+                <td class="px-4 py-2 text-right font-mono">{{ "{:,}".format(h.shares) }}</td>
+                <td class="px-4 py-2 text-right">${{ "{:,.0f}".format(h.value_usd) }}</td>
+                <td class="px-4 py-2 text-right {% if h.change_pct and h.change_pct > 0 %}text-green-400{% elif h.change_pct and h.change_pct < 0 %}text-red-400{% endif %}">
+                    {{ "%.1f%%"|format(h.change_pct) if h.change_pct else "-" }}
+                </td>
+                <td class="px-4 py-2 text-slate-400 text-sm">{{ h.filing_date }}</td>
+            </tr>
+            {% endfor %}
+            {% if not holdings %}
+            <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">No whale data yet. Filings update daily.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

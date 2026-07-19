@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Signals{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Recent Signals</h1>
+<div class="bg-slate-800 rounded-lg overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-slate-700">
+            <tr>
+                <th class="px-4 py-2 text-left">Time</th>
+                <th class="px-4 py-2 text-left">Symbol</th>
+                <th class="px-4 py-2 text-left">Action</th>
+                <th class="px-4 py-2 text-right">Score</th>
+                <th class="px-4 py-2 text-left">Strategy</th>
+                <th class="px-4 py-2 text-left">Reasoning</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in signals %}
+            <tr class="border-t border-slate-700">
+                <td class="px-4 py-2 text-slate-400 text-sm">{{ s.timestamp[:16] }}</td>
+                <td class="px-4 py-2 font-medium">{{ s.symbol }}</td>
+                <td class="px-4 py-2">
+                    <span class="px-2 py-0.5 rounded text-xs
+                        {% if s.action == 'BUY' %}bg-green-900 text-green-300
+                        {% elif s.action == 'SELL' %}bg-red-900 text-red-300
+                        {% else %}bg-slate-700 text-slate-300{% endif %}">
+                        {{ s.action }}
+                    </span>
+                </td>
+                <td class="px-4 py-2 text-right font-mono">{{ "%.3f"|format(s.score) }}</td>
+                <td class="px-4 py-2 text-slate-400 text-sm">{{ s.strategy }}</td>
+                <td class="px-4 py-2 text-slate-400 text-sm max-w-xs truncate">{{ s.reasoning or "-" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

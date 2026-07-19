@@ -1,0 +1,43 @@
+# --- Secrets: NEVER commit ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+
+# --- Runtime data (contains account number, equity, full trade history) ---
+bot.log
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
+data/stockpilot.db
+
+# --- Generated output ---
+reports/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Local agent/tooling config (may contain local paths or private notes) ---
+.claude/

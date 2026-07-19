@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}API Costs{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">API Costs</h1>
+
+<div class="bg-slate-800 rounded-lg p-6 mb-6">
+    <div class="text-3xl font-bold text-primary">${{ "%.2f"|format(total_today) }}</div>
+    <div class="text-slate-400">Today's API Cost</div>
+</div>
+
+<div class="bg-slate-800 rounded-lg overflow-hidden">
+    <table class="w-full">
+        <thead class="bg-slate-700">
+            <tr>
+                <th class="px-4 py-2 text-left">Time</th>
+                <th class="px-4 py-2 text-left">Model</th>
+                <th class="px-4 py-2 text-right">Input Tokens</th>
+                <th class="px-4 py-2 text-right">Output Tokens</th>
+                <th class="px-4 py-2 text-right">Cost</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in costs %}
+            <tr class="border-t border-slate-700">
+                <td class="px-4 py-2 text-slate-400 text-sm">{{ c.timestamp[:19] }}</td>
+                <td class="px-4 py-2">{{ c.model }}</td>
+                <td class="px-4 py-2 text-right font-mono">{{ "{:,}".format(c.input_tokens) }}</td>
+                <td class="px-4 py-2 text-right font-mono">{{ "{:,}".format(c.output_tokens) }}</td>
+                <td class="px-4 py-2 text-right text-primary">${{ "%.4f"|format(c.cost_usd) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

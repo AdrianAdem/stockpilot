@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StockPilot - {% block title %}Dashboard{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { theme: { extend: { colors: { primary: '#38bdf8' } } } }
+    </script>
+</head>
+<body class="bg-slate-900 text-slate-200 min-h-screen">
+    <nav class="bg-slate-800 border-b border-slate-700 px-6 py-3">
+        <div class="flex items-center gap-6">
+            <span class="text-xl font-bold text-primary">StockPilot</span>
+            <a href="/" class="hover:text-primary">Dashboard</a>
+            <a href="/positions" class="hover:text-primary">Positions</a>
+            <a href="/signals" class="hover:text-primary">Signals</a>
+            <a href="/whales" class="hover:text-primary">Whales</a>
+            <a href="/backtest" class="hover:text-primary">Backtest</a>
+            <a href="/logs" class="hover:text-primary">Logs</a>
+            <a href="/costs" class="hover:text-primary">API Costs</a>
+        </div>
+    </nav>
+    <main class="p-6">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
