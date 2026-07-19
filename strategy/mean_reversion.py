@@ -23,8 +23,9 @@ class MeanReversionStrategy(Strategy):
             return False
         return price * avg_vol > LARGE_CAP_PROXY_THRESHOLD
 
-    async def generate_signals(self, universe: list[str], tech_data: dict,
-                               **kwargs) -> list[Signal]:
+    async def generate_signals(
+        self, universe: list[str], tech_data: dict, **kwargs
+    ) -> list[Signal]:
         signals = []
         news_aggregator = kwargs.get("news")
 
@@ -40,23 +41,27 @@ class MeanReversionStrategy(Strategy):
             sell_score = self._check_sell(td)
 
             if buy_score > 0.3:
-                signals.append(Signal(
-                    symbol=symbol,
-                    action=Action.BUY,
-                    score=buy_score,
-                    strategy=self.name,
-                    target_price=td.get("BB_middle"),
-                    stop_loss_price=self._calc_stop(td),
-                    reasoning=self._reasoning(td),
-                ))
+                signals.append(
+                    Signal(
+                        symbol=symbol,
+                        action=Action.BUY,
+                        score=buy_score,
+                        strategy=self.name,
+                        target_price=td.get("BB_middle"),
+                        stop_loss_price=self._calc_stop(td),
+                        reasoning=self._reasoning(td),
+                    )
+                )
             elif sell_score > 0.3:
-                signals.append(Signal(
-                    symbol=symbol,
-                    action=Action.SELL,
-                    score=sell_score,
-                    strategy=self.name,
-                    reasoning="price at mean, take profit",
-                ))
+                signals.append(
+                    Signal(
+                        symbol=symbol,
+                        action=Action.SELL,
+                        score=sell_score,
+                        strategy=self.name,
+                        reasoning="price at mean, take profit",
+                    )
+                )
 
         logger.info("mean_reversion_signals", count=len(signals))
         return signals

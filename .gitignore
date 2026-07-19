@@ -41,3 +41,7 @@ Thumbs.db
 
 # --- Local agent/tooling config (may contain local paths or private notes) ---
 .claude/
+
+# --- Tooling ---
+.ruff_cache/
+.pytest_cache/

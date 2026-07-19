@@ -21,9 +21,13 @@ class PositionSizer:
     def __init__(self, config: RiskConfig):
         self.config = config
 
-    def calculate(self, signal: Signal, account: dict,
-                  existing_positions: list[dict],
-                  current_price: float | None = None) -> PositionSize | None:
+    def calculate(
+        self,
+        signal: Signal,
+        account: dict,
+        existing_positions: list[dict],
+        current_price: float | None = None,
+    ) -> PositionSize | None:
         equity = float(account.get("equity", 0))
         buying_power = float(account.get("buying_power", 0))
 
@@ -50,8 +54,11 @@ class PositionSizer:
         target_pct = base_pct + (self.MAX_SINGLE_PCT_CAP - base_pct) * conviction
         max_value = equity * target_pct - existing_value
         if max_value <= 0:
-            logger.info("position_cap_reached", symbol=signal.symbol,
-                        existing_value=round(existing_value, 2))
+            logger.info(
+                "position_cap_reached",
+                symbol=signal.symbol,
+                existing_value=round(existing_value, 2),
+            )
             return None
 
         # Kelly criterion as upper bound
@@ -83,8 +90,9 @@ class PositionSizer:
 
         # Minimum position size
         if max_value < self.config.min_position_usd:
-            logger.info("position_too_small", value=max_value,
-                        min_required=self.config.min_position_usd)
+            logger.info(
+                "position_too_small", value=max_value, min_required=self.config.min_position_usd
+            )
             return None
 
         # Check buying power
@@ -103,14 +111,19 @@ class PositionSizer:
             # Check if we already hold this stock
             held = any(p.get("symbol") == signal.symbol for p in existing_positions)
             if not held:
-                logger.info("max_positions_reached",
-                            current=len(existing_positions),
-                            max=self.config.max_positions)
+                logger.info(
+                    "max_positions_reached",
+                    current=len(existing_positions),
+                    max=self.config.max_positions,
+                )
                 return None
 
-        logger.info("position_sized", symbol=signal.symbol,
-                     shares=shares, value=round(value, 2),
-                     pct=round(pct * 100, 1))
+        logger.info(
+            "position_sized",
+            symbol=signal.symbol,
+            shares=shares,
+            value=round(value, 2),
+            pct=round(pct * 100, 1),
+        )
 
-        return PositionSize(shares=shares, value=round(value, 2),
-                           pct_of_portfolio=round(pct, 4))
+        return PositionSize(shares=shares, value=round(value, 2), pct_of_portfolio=round(pct, 4))

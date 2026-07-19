@@ -93,9 +93,12 @@ class TechnicalAnalysis:
         result["SMA_50"] = round(float(sma50.iloc[-1]), 2) if not np.isnan(sma50.iloc[-1]) else None
         result["SMA_200"] = (round(float(sma200.iloc[-1]), 2)
                              if sma200 is not None and not np.isnan(sma200.iloc[-1]) else None)
-        result["above_SMA50"] = current_price > sma50.iloc[-1] if result["SMA_50"] else None
-        result["above_SMA200"] = (current_price > sma200.iloc[-1]
-                                  if result["SMA_200"] else None)
+        # cast to native bool: numpy.bool_ is not JSON-serialisable and breaks
+        # identity checks downstream
+        result["above_SMA50"] = bool(current_price > sma50.iloc[-1]) if result["SMA_50"] else None
+        result["above_SMA200"] = (
+            bool(current_price > sma200.iloc[-1]) if result["SMA_200"] else None
+        )
 
         # Golden / Death cross
         if result["SMA_50"] and result["SMA_200"]:

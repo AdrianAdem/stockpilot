@@ -3,9 +3,9 @@ import io
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
 from backtest.engine import BacktestResult
 
@@ -13,7 +13,7 @@ from backtest.engine import BacktestResult
 def generate_html_report(result: BacktestResult, strategy_name: str = "Combined") -> str:
     equity_chart = _plot_equity_curve(result.equity_curve)
     drawdown_chart = _plot_drawdown(result.drawdown_curve)
-    monthly_heatmap = _plot_monthly_returns(result)
+    _plot_monthly_returns(result)
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -40,7 +40,7 @@ th {{ background: #1e293b; }}
 <p>Strategy: <b>{strategy_name}</b> | Period: {result.start_date} to {result.end_date}</p>
 
 <div class="metrics">
-<div class="metric"><div class="metric-value {'positive' if result.total_return_pct > 0 else 'negative'}">{result.total_return_pct:+.1f}%</div><div class="metric-label">Total Return</div></div>
+<div class="metric"><div class="metric-value {"positive" if result.total_return_pct > 0 else "negative"}">{result.total_return_pct:+.1f}%</div><div class="metric-label">Total Return</div></div>
 <div class="metric"><div class="metric-value">{result.cagr:.1f}%</div><div class="metric-label">CAGR</div></div>
 <div class="metric"><div class="metric-value">{result.sharpe_ratio:.2f}</div><div class="metric-label">Sharpe Ratio</div></div>
 <div class="metric"><div class="metric-value negative">{result.max_drawdown:.1f}%</div><div class="metric-label">Max Drawdown</div></div>
@@ -124,8 +124,7 @@ def _plot_monthly_returns(result: BacktestResult) -> str:
 
 def _fig_to_base64(fig) -> str:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
+    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
 

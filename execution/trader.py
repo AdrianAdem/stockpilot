@@ -1,5 +1,3 @@
-from datetime import datetime
-
 import structlog
 
 from data.alpaca_client import AlpacaClient
@@ -11,15 +9,25 @@ logger = structlog.get_logger()
 
 
 class Trader:
-    def __init__(self, alpaca: AlpacaClient, db: Database,
-                 portfolio_manager: PortfolioManager):
+    """Places entry orders after the risk layer has approved them.
+
+    Exits are deliberately NOT handled here — StopLossManager owns every exit
+    so that trailing stops, take-profit and time stops cannot fight each other.
+    """
+
+    def __init__(self, alpaca: AlpacaClient, db: Database, portfolio_manager: PortfolioManager):
         self.alpaca = alpaca
         self.db = db
         self.pm = portfolio_manager
 
-    async def execute(self, signal: Signal, qty: int,
-                      account: dict, positions: list[dict],
-                      current_price: float | None = None) -> TradeRecord | None:
+    async def execute(
+        self,
+        signal: Signal,
+        qty: int,
+        account: dict,
+        positions: list[dict],
+        current_price: float | None = None,
+    ) -> TradeRecord | None:
         # Final safety checks
         clock = await self.alpaca.get_market_clock()
         if not clock.get("is_open"):
@@ -29,12 +37,10 @@ class Trader:
         # BUY gates: no averaging-in + hard 5% per-position cap, then sector limit
         if signal.action.value == "BUY":
             intended_value = qty * (current_price or signal.stop_loss_price or 0)
-            if not self.pm.can_open_position(signal.symbol, positions, account,
-                                             intended_value):
+            if not self.pm.can_open_position(signal.symbol, positions, account, intended_value):
                 return None
             if not self.pm.check_sector_limit(signal.symbol, positions, account):
-                logger.warning("order_blocked", symbol=signal.symbol,
-                               reason="sector_limit")
+                logger.warning("order_blocked", symbol=signal.symbol, reason="sector_limit")
                 return None
 
         # Determine order type
@@ -64,12 +70,19 @@ class Trader:
                         stop_price=signal.stop_loss_price,
                         time_in_force="gtc",
                     )
-                    logger.info("stop_loss_placed", symbol=signal.symbol,
-                                qty=qty, stop_price=signal.stop_loss_price,
-                                order_id=stop_order.get("id"))
+                    logger.info(
+                        "stop_loss_placed",
+                        symbol=signal.symbol,
+                        qty=qty,
+                        stop_price=signal.stop_loss_price,
+                        order_id=stop_order.get("id"),
+                    )
                 else:
-                    logger.warning("no_stop_loss_for_buy", symbol=signal.symbol,
-                                   reason="signal_had_no_stop_price")
+                    logger.warning(
+                        "no_stop_loss_for_buy",
+                        symbol=signal.symbol,
+                        reason="signal_had_no_stop_price",
+                    )
 
             elif signal.action.value == "SELL":
                 order = await self.alpaca.submit_order(
@@ -104,12 +117,14 @@ class Trader:
         await self.db.log_trade(trade)
         # signal logging happens in main loop for ALL signals, not just trades
 
-        logger.info("trade_executed",
-                     symbol=signal.symbol,
-                     side=signal.action.value,
-                     qty=qty,
-                     order_id=order.get("id"),
-                     strategy=signal.strategy,
-                     score=signal.score)
+        logger.info(
+            "trade_executed",
+            symbol=signal.symbol,
+            side=signal.action.value,
+            qty=qty,
+            order_id=order.get("id"),
+            strategy=signal.strategy,
+            score=signal.score,
+        )
 
         return trade

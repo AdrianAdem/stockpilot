@@ -1,13 +1,10 @@
-import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
 
 import pandas as pd
 import structlog
 
-from data.alpaca_client import AlpacaClient
 from data.technical import TechnicalAnalysis
-from storage.models import Action, Signal
+from storage.models import Action
 from strategy.base import Strategy
 
 logger = structlog.get_logger()
@@ -49,17 +46,24 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    def __init__(self, initial_capital: float = 100000.0,
-                 slippage: float = 0.0005,
-                 max_position_pct: float = 0.03):
+    def __init__(
+        self,
+        initial_capital: float = 100000.0,
+        slippage: float = 0.0005,
+        max_position_pct: float = 0.03,
+    ):
         self.initial_capital = initial_capital
         self.slippage = slippage
         self.max_position_pct = max_position_pct
         self.technical = TechnicalAnalysis()
 
-    async def run(self, strategy: Strategy, symbols: list[str],
-                  bars_data: dict[str, pd.DataFrame],
-                  lookback: int = 200) -> BacktestResult:
+    async def run(
+        self,
+        strategy: Strategy,
+        symbols: list[str],
+        bars_data: dict[str, pd.DataFrame],
+        lookback: int = 200,
+    ) -> BacktestResult:
         capital = self.initial_capital
         positions: dict[str, BacktestTrade] = {}
         trades: list[BacktestTrade] = []
@@ -86,7 +90,7 @@ class BacktestEngine:
                 df = bars_data.get(symbol)
                 if df is None or df.empty:
                     continue
-                mask = df.index <= pd.Timestamp(date, tz='UTC')
+                mask = df.index <= pd.Timestamp(date, tz="UTC")
                 historical = df[mask].tail(lookback)
                 if len(historical) >= 50:
                     tech_data[symbol] = self.technical.calculate_all(historical)
@@ -170,9 +174,9 @@ class BacktestEngine:
 
         return self._calculate_metrics(trades, equity_curve, dates)
 
-    def _calculate_metrics(self, trades: list[BacktestTrade],
-                           equity_curve: list[float],
-                           dates: list[str]) -> BacktestResult:
+    def _calculate_metrics(
+        self, trades: list[BacktestTrade], equity_curve: list[float], dates: list[str]
+    ) -> BacktestResult:
         wins = [t for t in trades if t.pnl > 0]
         losses = [t for t in trades if t.pnl <= 0]
 
@@ -188,9 +192,10 @@ class BacktestEngine:
                 returns.append((equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1])
         if returns:
             import statistics
+
             avg_ret = statistics.mean(returns)
             std_ret = statistics.stdev(returns) if len(returns) > 1 else 0.01
-            sharpe = (avg_ret / std_ret) * (252 ** 0.5) if std_ret > 0 else 0
+            sharpe = (avg_ret / std_ret) * (252**0.5) if std_ret > 0 else 0
         else:
             sharpe = 0
 
@@ -230,159 +235,21 @@ class BacktestEngine:
             drawdown_curve=drawdown_curve,
         )
 
-    async def run_combined(self, strategies: list[Strategy], symbols: list[str],
-                           bars_data: dict[str, pd.DataFrame],
-                           min_score: float = 0.5,
-                           lookback: int = 200) -> BacktestResult:
-        capital = self.initial_capital
-        positions: dict[str, BacktestTrade] = {}
-        trades: list[BacktestTrade] = []
-        equity_curve = [capital]
-
-        all_dates = set()
-        for df in bars_data.values():
-            if not df.empty:
-                all_dates.update(df.index.strftime("%Y-%m-%d").tolist())
-        dates = sorted(all_dates)
-
-        if not dates:
-            return self._empty_result()
-
-        def bar_for(symbol: str, d: str):
-            df = bars_data.get(symbol)
-            if df is None or df.empty:
-                return None
-            rows = df[df.index.strftime("%Y-%m-%d") == d]
-            return rows.iloc[0] if len(rows) else None
-
-        # No lookahead: signals computed on day i fill at day i+1's OPEN.
-        pending: list[Signal] = []
-
-        for i, date in enumerate(dates):
-            if i < lookback:
-                equity_curve.append(capital)
-                continue
-
-            # 1. Execute yesterday's signals at TODAY'S OPEN
-            for sig in pending:
-                bar = bar_for(sig.symbol, date)
-                if bar is None:
-                    continue
-                open_px = float(bar["open"])
-                if sig.action == Action.BUY and sig.symbol not in positions:
-                    entry_price = open_px * (1 + self.slippage)
-                    max_invest = capital * self.max_position_pct
-                    qty = int(max_invest / entry_price)
-                    if qty > 0 and qty * entry_price <= capital:
-                        capital -= qty * entry_price
-                        positions[sig.symbol] = BacktestTrade(
-                            symbol=sig.symbol, side="BUY", qty=qty,
-                            entry_price=entry_price, entry_date=date,
-                            strategy="combined",
-                        )
-                        # carry the ATR stop computed at signal time
-                        positions[sig.symbol].stop = sig.stop_loss_price
-                elif sig.action == Action.SELL and sig.symbol in positions:
-                    pos = positions.pop(sig.symbol)
-                    exit_price = open_px * (1 - self.slippage)
-                    pos.exit_price = exit_price
-                    pos.exit_date = date
-                    pos.pnl = (exit_price - pos.entry_price) * pos.qty
-                    capital += pos.qty * exit_price
-                    trades.append(pos)
-            pending = []
-
-            # 2. Intraday stop check using today's LOW (conservative: if low
-            #    breached the stop, assume fill AT the stop price)
-            for symbol in list(positions.keys()):
-                pos = positions[symbol]
-                bar = bar_for(symbol, date)
-                if bar is None:
-                    continue
-                stop = getattr(pos, "stop", None) or pos.entry_price * 0.95
-                if float(bar["low"]) <= stop:
-                    exit_price = stop * (1 - self.slippage)
-                    pos.exit_price = exit_price
-                    pos.exit_date = date
-                    pos.pnl = (exit_price - pos.entry_price) * pos.qty
-                    capital += pos.qty * exit_price
-                    trades.append(pos)
-                    del positions[symbol]
-
-            # 3. Compute signals from data up to today's close (fills tomorrow)
-            tech_data = {}
-            for symbol in symbols:
-                df = bars_data.get(symbol)
-                if df is None or df.empty:
-                    continue
-                mask = df.index <= pd.Timestamp(date, tz='UTC')
-                historical = df[mask].tail(lookback)
-                if len(historical) >= 50:
-                    tech_data[symbol] = self.technical.calculate_all(historical)
-
-            signal_map: dict[str, list[Signal]] = {}
-            for strategy in strategies:
-                try:
-                    sigs = await strategy.generate_signals(symbols, tech_data)
-                    for sig in sigs:
-                        if sig.symbol not in signal_map:
-                            signal_map[sig.symbol] = []
-                        signal_map[sig.symbol].append(sig)
-                except Exception:
-                    continue
-
-            for symbol, sigs in signal_map.items():
-                actions = set(s.action for s in sigs)
-                if Action.BUY in actions and Action.SELL in actions:
-                    continue
-                total_w = sum(
-                    next((st.weight for st in strategies if st.name == s.strategy), 0.25)
-                    for s in sigs
-                )
-                weighted = sum(
-                    s.score * next((st.weight for st in strategies if st.name == s.strategy), 0.25)
-                    for s in sigs
-                )
-                score = weighted / total_w if total_w > 0 else 0
-                if score < min_score:
-                    continue
-                best = max(sigs, key=lambda s: s.score)
-                pending.append(Signal(
-                    symbol=symbol,
-                    action=best.action,
-                    score=round(score, 3),
-                    strategy="combined",
-                    stop_loss_price=best.stop_loss_price,
-                    target_price=best.target_price,
-                ))
-
-            # 4. Mark-to-market at today's close
-            portfolio_value = capital
-            for sym, pos in positions.items():
-                bar = bar_for(sym, date)
-                p = float(bar["close"]) if bar is not None else pos.entry_price
-                portfolio_value += pos.qty * p
-            equity_curve.append(portfolio_value)
-
-        for symbol, pos in positions.items():
-            df = bars_data.get(symbol)
-            if df is not None and not df.empty:
-                last_price = df["close"].iloc[-1]
-                pos.exit_price = last_price
-                pos.exit_date = dates[-1]
-                pos.pnl = (last_price - pos.entry_price) * pos.qty
-                capital += pos.qty * last_price
-                trades.append(pos)
-
-        return self._calculate_metrics(trades, equity_curve, dates)
-
     def _empty_result(self) -> BacktestResult:
         return BacktestResult(
-            start_date="", end_date="",
+            start_date="",
+            end_date="",
             initial_capital=self.initial_capital,
             final_capital=self.initial_capital,
-            total_return_pct=0, cagr=0, sharpe_ratio=0,
-            max_drawdown=0, win_rate=0, profit_factor=0,
-            total_trades=0, winning_trades=0, losing_trades=0,
-            avg_win=0, avg_loss=0,
+            total_return_pct=0,
+            cagr=0,
+            sharpe_ratio=0,
+            max_drawdown=0,
+            win_rate=0,
+            profit_factor=0,
+            total_trades=0,
+            winning_trades=0,
+            losing_trades=0,
+            avg_win=0,
+            avg_loss=0,
         )

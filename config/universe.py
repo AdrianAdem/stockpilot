@@ -1,4 +1,3 @@
-import asyncio
 import time
 
 import httpx
@@ -23,9 +22,31 @@ def _normalize_name(name: str) -> str:
     n = name.upper()
     for ch in [".", ",", "&", "'", "-", "/"]:
         n = n.replace(ch, " ")
-    drop = {"INC", "CORP", "CORPORATION", "CO", "COMPANY", "LTD", "LLC", "PLC",
-            "THE", "CLASS", "CL", "A", "B", "C", "COM", "HLDGS", "HOLDINGS",
-            "GROUP", "GRP", "INTERNATIONAL", "INTL", "INDS", "INDUSTRIES"}
+    drop = {
+        "INC",
+        "CORP",
+        "CORPORATION",
+        "CO",
+        "COMPANY",
+        "LTD",
+        "LLC",
+        "PLC",
+        "THE",
+        "CLASS",
+        "CL",
+        "A",
+        "B",
+        "C",
+        "COM",
+        "HLDGS",
+        "HOLDINGS",
+        "GROUP",
+        "GRP",
+        "INTERNATIONAL",
+        "INTL",
+        "INDS",
+        "INDUSTRIES",
+    }
     tokens = [t for t in n.split() if t and t not in drop]
     return " ".join(tokens)
 
@@ -52,8 +73,12 @@ async def fetch_sp500() -> list[str]:
                 _name_to_ticker[norm] = tic
         if sector_col:
             _ticker_to_sector[tic] = str(r[sector_col]).strip()
-    logger.info("sp500_fetched", count=len(symbols),
-                name_map=len(_name_to_ticker), sectors=len(_ticker_to_sector))
+    logger.info(
+        "sp500_fetched",
+        count=len(symbols),
+        name_map=len(_name_to_ticker),
+        sectors=len(_ticker_to_sector),
+    )
     return symbols
 
 

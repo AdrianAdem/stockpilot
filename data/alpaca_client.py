@@ -14,6 +14,12 @@ RATE_LIMIT_DELAY = 0.3  # ~200 req/min
 
 
 class AlpacaClient:
+    """Minimal async Alpaca REST client (paper trading only).
+
+    Refuses to construct against a live endpoint. Handles retries, rate
+    limiting and the empty-body 204 responses returned by order cancellation.
+    """
+
     def __init__(self, config: AlpacaConfig):
         if "paper-api.alpaca.markets" not in config.base_url:
             raise RuntimeError("SAFETY: Only paper trading allowed!")

@@ -7,9 +7,10 @@ therefore identical across all runs by construction — only the exit differs.
 
 No live-system changes. No Claude at runtime. Pure technical, backtestable rules.
 """
+
 import asyncio
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pandas as pd
 import structlog
@@ -20,17 +21,17 @@ from config.settings import load_config
 from config.universe import get_universe
 from data.alpaca_client import AlpacaClient
 from data.technical import TechnicalAnalysis
-from strategy.momentum import MomentumStrategy
 from strategy.mean_reversion import MeanReversionStrategy
+from strategy.momentum import MomentumStrategy
 
 # --- frozen entry parameters (NOT changed in this task) ---
 MIN_SCORE = 0.65
 W_MOM, W_MR = 0.55, 0.45
 SLIPPAGE = 0.0005
-NOTIONAL = 5000.0          # fixed $ per trade -> identical sizing all models
+NOTIONAL = 5000.0  # fixed $ per trade -> identical sizing all models
 INITIAL_CAPITAL = 100000.0
-ENTRY_COOLDOWN = 10        # trading days; exit-independent entry gate
-INITIAL_STOP_ATR = 2.0     # entry - 2*ATR, common to all models
+ENTRY_COOLDOWN = 10  # trading days; exit-independent entry gate
+INITIAL_STOP_ATR = 2.0  # entry - 2*ATR, common to all models
 LOOKBACK = 200
 
 # --- Model 3 (adaptive) constants — tweak here ---
@@ -45,7 +46,7 @@ class Trade:
     entry_idx: int
     entry_price: float
     atr: float
-    rel_vol: float          # ATR/price at entry (for adaptive model)
+    rel_vol: float  # ATR/price at entry (for adaptive model)
     exit_idx: int = -1
     exit_price: float = 0.0
     pnl_pct: float = 0.0
@@ -70,8 +71,8 @@ async def build_entries(symbols, bars):
         arr[s] = d.set_index("dstr")
 
     entries = []
-    last_entry_idx = {}          # symbol -> last entry day index (cooldown)
-    pending = []                 # signals from day i, fill at i+1 open
+    last_entry_idx = {}  # symbol -> last entry day index (cooldown)
+    pending = []  # signals from day i, fill at i+1 open
 
     for i, date in enumerate(dates):
         # fill yesterday's signals at today's open
@@ -79,7 +80,7 @@ async def build_entries(symbols, bars):
             a = arr.get(sym)
             if a is None or date not in a.index:
                 continue
-            if i - last_entry_idx.get(sym, -10**9) < ENTRY_COOLDOWN:
+            if i - last_entry_idx.get(sym, -(10**9)) < ENTRY_COOLDOWN:
                 continue
             row = a.loc[date]
             open_px = float(row["open"]) * (1 + SLIPPAGE)
@@ -108,7 +109,7 @@ async def build_entries(symbols, bars):
             by_sym.setdefault(sg.symbol, []).append((W_MR, sg))
 
         for sym, lst in by_sym.items():
-            actions = set(sg.action.value for _, sg in lst)
+            actions = {sg.action.value for _, sg in lst}
             if "BUY" in actions and "SELL" in actions:
                 continue
             if "BUY" not in actions:
@@ -124,15 +125,20 @@ async def build_entries(symbols, bars):
         a = arr[sym]
         row = a.loc[date]
         atr = float(row.get("atr_14", 0)) if "atr_14" in a.columns else 0.0
-        enriched.append(Trade(symbol=sym, entry_idx=idx, entry_price=px,
-                              atr=atr, rel_vol=(atr / px if px else 0)))
+        enriched.append(
+            Trade(
+                symbol=sym, entry_idx=idx, entry_price=px, atr=atr, rel_vol=(atr / px if px else 0)
+            )
+        )
     return dates, arr, enriched
 
 
 def _atr_series(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    h, l, c = df["high"], df["low"], df["close"]
-    pc = c.shift(1)
-    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(
+        axis=1
+    )
     return tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
 
 
@@ -140,9 +146,9 @@ def replay(trade: Trade, dates, arr, exit_model, median_rv):
     """Replay one trade from entry to exit under the given model. Returns
     (exit_idx, exit_price). Stops checked intraday via the day's LOW."""
     a = arr[trade.symbol]
-    didx = {d: k for k, d in enumerate(dates)}
+    {d: k for k, d in enumerate(dates)}
     entry = trade.entry_price
-    stop = entry - INITIAL_STOP_ATR * trade.atr   # common initial stop
+    stop = entry - INITIAL_STOP_ATR * trade.atr  # common initial stop
     # adaptive factor
     if exit_model[0] == "adaptive":
         n = ADAPTIVE_LOW_FACTOR if trade.rel_vol < median_rv else ADAPTIVE_HIGH_FACTOR
@@ -156,7 +162,7 @@ def replay(trade: Trade, dates, arr, exit_model, median_rv):
         if date not in a.index:
             continue
         row = a.loc[date]
-        low, high, close = float(row["low"]), float(row["high"]), float(row["close"])
+        low, _high, close = float(row["low"]), float(row["high"]), float(row["close"])
         atr_now = float(row["atr_14"]) if not pd.isna(row["atr_14"]) else trade.atr
 
         # 1. intraday stop hit?
@@ -181,10 +187,9 @@ def replay(trade: Trade, dates, arr, exit_model, median_rv):
 
 def metrics(trades, dates, name):
     # daily equity curve: fixed notional per trade, mark-to-market
-    eq = [INITIAL_CAPITAL] * len(dates)
-    realized = 0.0
+    [INITIAL_CAPITAL] * len(dates)
     # build per-day contribution
-    daily = [0.0] * len(dates)
+    [0.0] * len(dates)
     pnls = []
     holds = []
     for t in trades:
@@ -196,7 +201,7 @@ def metrics(trades, dates, name):
     curve = [INITIAL_CAPITAL]
     running = INITIAL_CAPITAL
     exits_by_day = {}
-    for t, pnl in zip(trades, pnls):
+    for t, pnl in zip(trades, pnls, strict=False):
         exits_by_day.setdefault(t.exit_idx, 0.0)
         exits_by_day[t.exit_idx] += pnl
     for k in range(len(dates)):
@@ -204,9 +209,11 @@ def metrics(trades, dates, name):
         curve.append(running)
 
     total_ret = (curve[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
-    rets = [(curve[i] - curve[i-1]) / curve[i-1] for i in range(1, len(curve)) if curve[i-1] > 0]
+    rets = [
+        (curve[i] - curve[i - 1]) / curve[i - 1] for i in range(1, len(curve)) if curve[i - 1] > 0
+    ]
     if len(rets) > 1 and statistics.pstdev(rets) > 0:
-        sharpe = statistics.mean(rets) / statistics.pstdev(rets) * (252 ** 0.5)
+        sharpe = statistics.mean(rets) / statistics.pstdev(rets) * (252**0.5)
     else:
         sharpe = 0.0
     peak, maxdd = curve[0], 0.0
@@ -219,9 +226,16 @@ def metrics(trades, dates, name):
     wr = len(wins) / len(pnls) * 100 if pnls else 0
     avg_hold = statistics.mean(holds) if holds else 0
     return {
-        "name": name, "ret": total_ret, "sharpe": sharpe, "maxdd": maxdd * 100,
-        "pf": pf, "wr": wr, "n": len(trades), "hold": avg_hold,
-        "pnls": pnls, "total_pnl": sum(pnls),
+        "name": name,
+        "ret": total_ret,
+        "sharpe": sharpe,
+        "maxdd": maxdd * 100,
+        "pf": pf,
+        "wr": wr,
+        "n": len(trades),
+        "hold": avg_hold,
+        "pnls": pnls,
+        "total_pnl": sum(pnls),
     }
 
 
@@ -233,7 +247,7 @@ async def main():
     bars = await ac.get_bars_multi(syms, "1Day", limit=420)
     bars = {s: d for s, d in bars.items() if not d.empty and len(d) >= 260}
     # attach ATR series to each frame
-    for s, d in bars.items():
+    for _s, d in bars.items():
         d["atr_14"] = _atr_series(d)
     print(f"Universum: {len(bars)} Symbole, {max(len(d) for d in bars.values())} Tage")
 
@@ -252,11 +266,11 @@ async def main():
     ]
 
     # pick 3 example symbols that actually have a big winner under baseline
-    example_syms = []
     results = []
     per_model_trades = {}
     for label, model in models:
         import copy
+
         trades = [copy.copy(t) for t in entries]
         for t in trades:
             ei, ep = replay(t, dates, arr, model, median_rv)
@@ -265,15 +279,21 @@ async def main():
         results.append(metrics(trades, dates, label))
         per_model_trades[label] = trades
 
-    print(f"{'Modell':28} {'Return':>8} {'Sharpe':>7} {'MaxDD':>7} {'PF':>6} {'WinRate':>8} {'#Trades':>8} {'Ø-Hold':>7}")
+    print(
+        f"{'Modell':28} {'Return':>8} {'Sharpe':>7} {'MaxDD':>7} {'PF':>6} {'WinRate':>8} {'#Trades':>8} {'Ø-Hold':>7}"
+    )
     print("-" * 90)
     base_n = results[0]["n"]
     for r in results:
         flag = "  <-- #TRADES WEICHT AB!" if r["n"] != base_n else ""
         pf = f"{r['pf']:.2f}" if r["pf"] != float("inf") else "inf"
-        print(f"{r['name']:28} {r['ret']:>7.1f}% {r['sharpe']:>7.2f} {r['maxdd']:>6.1f}% {pf:>6} {r['wr']:>7.1f}% {r['n']:>8} {r['hold']:>6.1f}d{flag}")
+        print(
+            f"{r['name']:28} {r['ret']:>7.1f}% {r['sharpe']:>7.2f} {r['maxdd']:>6.1f}% {pf:>6} {r['wr']:>7.1f}% {r['n']:>8} {r['hold']:>6.1f}d{flag}"
+        )
 
-    print(f"\n#Trades identisch in allen Läufen: {all(r['n']==base_n for r in results)} ({base_n})")
+    print(
+        f"\n#Trades identisch in allen Läufen: {all(r['n'] == base_n for r in results)} ({base_n})"
+    )
 
     # Example trades: pick the 2 biggest baseline winners + 1 loser, show all models
     base_trades = per_model_trades[models[0][0]]

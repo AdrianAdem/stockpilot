@@ -9,11 +9,18 @@ logger = structlog.get_logger()
 
 
 class WhaleTracker:
+    """Turns raw 13F filings into a per-ticker institutional buy/sell consensus."""
+
     def __init__(self, sec_client: SECFilingsClient, db: Database):
         self.sec = sec_client
         self.db = db
 
     async def update_all(self):
+        """Refresh holdings for every tracked fund and store them by ticker.
+
+        Filings are diffed against the previous quarter, and issuer names are
+        resolved to tradeable tickers; unresolvable names are skipped.
+        """
         logger.info("whale_tracker_update_start")
         # Ensure the S&P fetch ran so the name->ticker map is populated —
         # off-hours calls this before the trading loop ever loads the universe.
@@ -37,20 +44,26 @@ class WhaleTracker:
                     if not ticker:
                         continue
                     matched += 1
-                    holdings.append(WhaleHolding(
-                        fund_name=name,
-                        cik=cik,
-                        symbol=ticker,
-                        shares=c.get("shares", 0),
-                        value_usd=c.get("value", 0),
-                        change_type=c["change_type"],
-                        change_pct=c.get("change_pct"),
-                        filing_date="latest",
-                    ))
+                    holdings.append(
+                        WhaleHolding(
+                            fund_name=name,
+                            cik=cik,
+                            symbol=ticker,
+                            shares=c.get("shares", 0),
+                            value_usd=c.get("value", 0),
+                            change_type=c["change_type"],
+                            change_pct=c.get("change_pct"),
+                            filing_date="latest",
+                        )
+                    )
                 if holdings:
                     await self.db.save_whale_holdings(holdings)
-                logger.info("whale_holdings_saved", fund=name,
-                            total_changes=len(changes), matched_tickers=matched)
+                logger.info(
+                    "whale_holdings_saved",
+                    fund=name,
+                    total_changes=len(changes),
+                    matched_tickers=matched,
+                )
             except Exception as e:
                 logger.error("whale_tracker_error", fund=name, error=str(e))
 
@@ -64,11 +77,13 @@ class WhaleTracker:
                         sym = c.get("name", "")
                         if sym not in consensus:
                             consensus[sym] = []
-                        consensus[sym].append({
-                            "fund": name,
-                            "change_type": c["change_type"],
-                            "change_pct": c.get("change_pct"),
-                        })
+                        consensus[sym].append(
+                            {
+                                "fund": name,
+                                "change_type": c["change_type"],
+                                "change_pct": c.get("change_pct"),
+                            }
+                        )
             except Exception as e:
                 logger.error("whale_top_buys_error", fund=name, error=str(e))
 

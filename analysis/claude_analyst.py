@@ -58,6 +58,12 @@ Rules:
 
 
 class ClaudeAnalyst:
+    """Two-tier LLM analysis: a cheap Haiku screen in front of Sonnet.
+
+    Tracks API health so an outage is reported explicitly instead of silently
+    degrading into technical-only signals, and logs token cost per call.
+    """
+
     def __init__(self, api_key: str, db: Database | None = None):
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.db = db
@@ -75,27 +81,27 @@ class ClaudeAnalyst:
         self.last_error = error
         if self.db:
             try:
-                await self.db.log_api_cost(model, 0, 0, 0.0,
-                                           success=False, error=error[:300])
+                await self.db.log_api_cost(model, 0, 0, 0.0, success=False, error=error[:300])
             except Exception:
                 pass
 
     async def quick_screen(self, symbol: str, tech_data: dict) -> dict | None:
         prompt = f"""Stock: {symbol}
-Price: ${tech_data.get('price', '?')}
-RSI: {tech_data.get('RSI', '?')}
-MACD: {tech_data.get('MACD_crossover', '?')}
-Above SMA50: {tech_data.get('above_SMA50', '?')}
-Above SMA200: {tech_data.get('above_SMA200', '?')}
-Volume Ratio: {tech_data.get('volume_ratio', '?')}
-BB Position: {tech_data.get('BB_position', '?')}"""
+Price: ${tech_data.get("price", "?")}
+RSI: {tech_data.get("RSI", "?")}
+MACD: {tech_data.get("MACD_crossover", "?")}
+Above SMA50: {tech_data.get("above_SMA50", "?")}
+Above SMA200: {tech_data.get("above_SMA200", "?")}
+Volume Ratio: {tech_data.get("volume_ratio", "?")}
+BB Position: {tech_data.get("BB_position", "?")}"""
 
         try:
             resp = await self.client.messages.create(
                 model=HAIKU_MODEL,
                 max_tokens=200,
-                system=[{"type": "text", "text": HAIKU_SYSTEM,
-                         "cache_control": {"type": "ephemeral"}}],
+                system=[
+                    {"type": "text", "text": HAIKU_SYSTEM, "cache_control": {"type": "ephemeral"}}
+                ],
                 messages=[{"role": "user", "content": prompt}],
             )
             await self._track_usage(resp, "haiku")
@@ -103,18 +109,28 @@ BB Position: {tech_data.get('BB_position', '?')}"""
             return self._parse_json(resp.content[0].text)
         except anthropic.APIError as e:
             # Real API failure (auth/rate/timeout/connection) — loud, tracked.
-            logger.error("claude_api_failure", model="haiku", symbol=symbol,
-                         error_type=type(e).__name__, error=str(e))
+            logger.error(
+                "claude_api_failure",
+                model="haiku",
+                symbol=symbol,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             await self._log_failure("haiku", f"{type(e).__name__}: {e}")
             return None
         except Exception as e:
             logger.error("haiku_screen_error", symbol=symbol, error=str(e))
             return None
 
-    async def deep_analysis(self, symbol: str, tech_data: dict,
-                            whale_data: dict, news: list[dict],
-                            macro_data: dict,
-                            portfolio_context: str = "") -> ClaudeAnalysis | None:
+    async def deep_analysis(
+        self,
+        symbol: str,
+        tech_data: dict,
+        whale_data: dict,
+        news: list[dict],
+        macro_data: dict,
+        portfolio_context: str = "",
+    ) -> ClaudeAnalysis | None:
         # Per-symbol data in the user turn — the static SONNET_SYSTEM stays cached.
         user_content = f"""Stock: {symbol}
 Current Price: ${tech_data.get("price", "?")}
@@ -130,8 +146,9 @@ Analyze this stock and provide your recommendation."""
             resp = await self.client.messages.create(
                 model=SONNET_MODEL,
                 max_tokens=500,
-                system=[{"type": "text", "text": SONNET_SYSTEM,
-                         "cache_control": {"type": "ephemeral"}}],
+                system=[
+                    {"type": "text", "text": SONNET_SYSTEM, "cache_control": {"type": "ephemeral"}}
+                ],
                 messages=[{"role": "user", "content": user_content}],
             )
             await self._track_usage(resp, "sonnet")
@@ -151,8 +168,13 @@ Analyze this stock and provide your recommendation."""
                 sector_outlook=data.get("sector_outlook", "neutral"),
             )
         except anthropic.APIError as e:
-            logger.error("claude_api_failure", model="sonnet", symbol=symbol,
-                         error_type=type(e).__name__, error=str(e))
+            logger.error(
+                "claude_api_failure",
+                model="sonnet",
+                symbol=symbol,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             await self._log_failure("sonnet", f"{type(e).__name__}: {e}")
             return None
         except Exception as e:
@@ -189,14 +211,24 @@ Analyze this stock and provide your recommendation."""
             await self.db.log_api_cost(model, usage.input_tokens, usage.output_tokens, cost)
 
         cache_read = getattr(usage, "cache_read_input_tokens", 0)
-        logger.debug("claude_usage", model=model, input=usage.input_tokens,
-                      output=usage.output_tokens, cache_read=cache_read,
-                      cost=f"${cost:.4f}")
+        logger.debug(
+            "claude_usage",
+            model=model,
+            input=usage.input_tokens,
+            output=usage.output_tokens,
+            cache_read=cache_read,
+            cost=f"${cost:.4f}",
+        )
 
-    async def analyze_for_signal(self, symbol: str, tech_data: dict,
-                                  whale_data: dict, news: list[dict],
-                                  macro_data: dict,
-                                  portfolio_context: str = "") -> Signal | None:
+    async def analyze_for_signal(
+        self,
+        symbol: str,
+        tech_data: dict,
+        whale_data: dict,
+        news: list[dict],
+        macro_data: dict,
+        portfolio_context: str = "",
+    ) -> Signal | None:
         # Tier 1: Quick screen
         screen = await self.quick_screen(symbol, tech_data)
         if not screen or not screen.get("tradeable"):

@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +12,8 @@ DB_PATH = Path(__file__).parent.parent / "data" / "stockpilot.db"
 
 
 class Database:
+    """Async SQLite store for trades, signals, API costs and equity snapshots."""
+
     def __init__(self, db_path: str | Path | None = None):
         self.db_path = str(db_path or DB_PATH)
         self._db: aiosqlite.Connection | None = None
@@ -31,7 +32,8 @@ class Database:
         cols = {r[1] for r in await cursor.fetchall()}
         if "success" not in cols:
             await self._db.execute(
-                "ALTER TABLE api_costs ADD COLUMN success INTEGER NOT NULL DEFAULT 1")
+                "ALTER TABLE api_costs ADD COLUMN success INTEGER NOT NULL DEFAULT 1"
+            )
         if "error" not in cols:
             await self._db.execute("ALTER TABLE api_costs ADD COLUMN error TEXT")
         await self._db.commit()
@@ -111,9 +113,15 @@ class Database:
              stop_loss, take_profit, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                trade.symbol, trade.side.value, trade.qty, trade.price,
-                trade.order_id, trade.strategy, trade.signal_score,
-                trade.stop_loss, trade.take_profit,
+                trade.symbol,
+                trade.side.value,
+                trade.qty,
+                trade.price,
+                trade.order_id,
+                trade.strategy,
+                trade.signal_score,
+                trade.stop_loss,
+                trade.take_profit,
                 trade.timestamp.isoformat(),
             ),
         )
@@ -151,8 +159,9 @@ class Database:
         rows = await cursor.fetchall()
         return [TradeRecord(**dict(r)) for r in rows]
 
-    async def log_signal(self, symbol: str, action: str, score: float,
-                         strategy: str, reasoning: str = ""):
+    async def log_signal(
+        self, symbol: str, action: str, score: float, strategy: str, reasoning: str = ""
+    ):
         await self._db.execute(
             """INSERT INTO signals_log (symbol, action, score, strategy, reasoning, timestamp)
             VALUES (?, ?, ?, ?, ?, ?)""",
@@ -160,15 +169,28 @@ class Database:
         )
         await self._db.commit()
 
-    async def log_api_cost(self, model: str, input_tokens: int,
-                           output_tokens: int, cost_usd: float,
-                           success: bool = True, error: str | None = None):
+    async def log_api_cost(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        success: bool = True,
+        error: str | None = None,
+    ):
         await self._db.execute(
             """INSERT INTO api_costs
             (model, input_tokens, output_tokens, cost_usd, timestamp, success, error)
             VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (model, input_tokens, output_tokens, cost_usd,
-             datetime.utcnow().isoformat(), 1 if success else 0, error),
+            (
+                model,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                datetime.utcnow().isoformat(),
+                1 if success else 0,
+                error,
+            ),
         )
         await self._db.commit()
 
@@ -204,8 +226,15 @@ class Database:
                  change_pct, filing_date, fetched_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    h.fund_name, h.cik, h.symbol, h.shares, h.value_usd,
-                    h.change_type, h.change_pct, h.filing_date, now,
+                    h.fund_name,
+                    h.cik,
+                    h.symbol,
+                    h.shares,
+                    h.value_usd,
+                    h.change_type,
+                    h.change_pct,
+                    h.filing_date,
+                    now,
                 ),
             )
         await self._db.commit()

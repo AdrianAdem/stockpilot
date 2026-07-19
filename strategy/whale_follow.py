@@ -15,8 +15,9 @@ class WhaleFollowStrategy(Strategy):
         self.sec = sec_client
         self.db = db
 
-    async def generate_signals(self, universe: list[str], tech_data: dict,
-                               **kwargs) -> list[Signal]:
+    async def generate_signals(
+        self, universe: list[str], tech_data: dict, **kwargs
+    ) -> list[Signal]:
         signals = []
 
         if not self.db:
@@ -49,19 +50,20 @@ class WhaleFollowStrategy(Strategy):
                 continue
 
             whale_info = ", ".join(
-                f"{b['fund']} +{b.get('change_pct', '?')}%"
-                for b in consensus["buyers"][:5]
+                f"{b['fund']} +{b.get('change_pct', '?')}%" for b in consensus["buyers"][:5]
             )
 
-            signals.append(Signal(
-                symbol=symbol,
-                action=Action.BUY,
-                score=round(score, 2),
-                strategy=self.name,
-                stop_loss_price=self._calc_stop(td),
-                timeframe="weeks",
-                reasoning=f"Whale accumulation: {whale_info}",
-            ))
+            signals.append(
+                Signal(
+                    symbol=symbol,
+                    action=Action.BUY,
+                    score=round(score, 2),
+                    strategy=self.name,
+                    stop_loss_price=self._calc_stop(td),
+                    timeframe="weeks",
+                    reasoning=f"Whale accumulation: {whale_info}",
+                )
+            )
 
         logger.info("whale_signals", count=len(signals))
         return signals

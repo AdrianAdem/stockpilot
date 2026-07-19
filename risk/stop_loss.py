@@ -20,9 +20,14 @@ class StopLossManager:
     ATR = ATR(14) on daily bars — identical to the backtest.
     """
 
-    def __init__(self, alpaca: AlpacaClient, db: Database,
-                 trailing_factor: float = 2.5, initial_stop_factor: float = 2.0,
-                 telegram=None):
+    def __init__(
+        self,
+        alpaca: AlpacaClient,
+        db: Database,
+        trailing_factor: float = 2.5,
+        initial_stop_factor: float = 2.0,
+        telegram=None,
+    ):
         self.alpaca = alpaca
         self.db = db
         self.trailing_factor = trailing_factor
@@ -83,9 +88,13 @@ class StopLossManager:
                 stop_price = round(entry * 0.95, 2) if entry > 0 else None
             if not stop_price:
                 continue
-            logger.warning("stop_desync_fixed", symbol=symbol,
-                           pos_qty=pos_qty, covered_qty=covered,
-                           stop_price=stop_price)
+            logger.warning(
+                "stop_desync_fixed",
+                symbol=symbol,
+                pos_qty=pos_qty,
+                covered_qty=covered,
+                stop_price=stop_price,
+            )
             await self._replace_stop(symbol, pos_qty, stop_price)
 
     async def _replace_stop(self, symbol: str, qty: int, stop_price: float):
@@ -96,19 +105,25 @@ class StopLossManager:
             return
         try:
             orders = await self.alpaca.get_orders()
-            existing = [o for o in orders
-                        if o.get("symbol") == symbol and o.get("type") == "stop"
-                        and o.get("side") == "sell"]
+            existing = [
+                o
+                for o in orders
+                if o.get("symbol") == symbol and o.get("type") == "stop" and o.get("side") == "sell"
+            ]
             if existing:
                 # Atomic replace of the first; cancel any extras (desync).
                 await self.alpaca.replace_order(
-                    existing[0]["id"], stop_price=round(stop_price, 2), qty=qty)
+                    existing[0]["id"], stop_price=round(stop_price, 2), qty=qty
+                )
                 for extra in existing[1:]:
                     await self.alpaca.cancel_order(extra["id"])
             else:
                 await self.alpaca.submit_order(
-                    symbol=symbol, qty=qty, side="sell",
-                    order_type="stop", stop_price=round(stop_price, 2),
+                    symbol=symbol,
+                    qty=qty,
+                    side="sell",
+                    order_type="stop",
+                    stop_price=round(stop_price, 2),
                     time_in_force="gtc",
                 )
         except Exception as e:
@@ -143,10 +158,15 @@ class StopLossManager:
             new_stop = round(current - self.trailing_factor * atr, 2)
             cur_stop = trade.stop_loss or 0
             if new_stop > cur_stop:
-                logger.info("trailing_stop_update", symbol=symbol,
-                            old_stop=cur_stop, new_stop=new_stop,
-                            price=current, atr=round(atr, 2),
-                            factor=self.trailing_factor)
+                logger.info(
+                    "trailing_stop_update",
+                    symbol=symbol,
+                    old_stop=cur_stop,
+                    new_stop=new_stop,
+                    price=current,
+                    atr=round(atr, 2),
+                    factor=self.trailing_factor,
+                )
                 await self._replace_stop(symbol, qty, new_stop)
                 await self.db.update_stop_loss(symbol, new_stop)
                 trade.stop_loss = new_stop  # avoid re-triggering this run
@@ -172,16 +192,17 @@ class StopLossManager:
                 logger.warning("migration_no_atr", symbol=symbol)
                 continue
             # Only trail up if profitable; otherwise keep initial stop.
-            new_stop = round(current - self.trailing_factor * atr, 2) \
-                if current > trade.price else cur_stop
+            new_stop = (
+                round(current - self.trailing_factor * atr, 2)
+                if current > trade.price
+                else cur_stop
+            )
             if new_stop > cur_stop:
                 await self._replace_stop(symbol, qty, new_stop)
                 await self.db.update_stop_loss(symbol, new_stop)
-                logger.info("stop_migrated", symbol=symbol,
-                            old_stop=cur_stop, new_stop=new_stop)
+                logger.info("stop_migrated", symbol=symbol, old_stop=cur_stop, new_stop=new_stop)
             else:
-                logger.info("stop_kept", symbol=symbol, stop=cur_stop,
-                            would_be=new_stop)
+                logger.info("stop_kept", symbol=symbol, stop=cur_stop, would_be=new_stop)
 
     async def handle_take_profit(self, positions: list[dict]):
         trades = await self.db.get_open_trades()
@@ -207,11 +228,14 @@ class StopLossManager:
             remaining = qty - sell_qty
             try:
                 await self.alpaca.submit_order(
-                    symbol=symbol, qty=sell_qty, side="sell",
+                    symbol=symbol,
+                    qty=sell_qty,
+                    side="sell",
                     order_type="market",
                 )
-                logger.info("take_profit_partial", symbol=symbol,
-                            sold_qty=sell_qty, remaining=remaining)
+                logger.info(
+                    "take_profit_partial", symbol=symbol, sold_qty=sell_qty, remaining=remaining
+                )
                 # Notify — partial sale keeps the symbol held, so the main-loop
                 # close-sync can't see it; report it here.
                 if self.telegram:
@@ -224,8 +248,7 @@ class StopLossManager:
                     )
                 # Resize stop to remaining qty and tighten to break-even.
                 if remaining > 0:
-                    await self._replace_stop(symbol, remaining,
-                                             round(trade.price, 2))
+                    await self._replace_stop(symbol, remaining, round(trade.price, 2))
             except Exception as e:
                 logger.error("take_profit_error", symbol=symbol, error=str(e))
 
@@ -250,8 +273,9 @@ class StopLossManager:
             if pnl_pct >= 0.05:
                 continue
 
-            logger.info("time_stop_triggered", symbol=trade.symbol,
-                        days=days_held, pnl_pct=f"{pnl_pct:.1%}")
+            logger.info(
+                "time_stop_triggered", symbol=trade.symbol, days=days_held, pnl_pct=f"{pnl_pct:.1%}"
+            )
 
             # Claude re-evaluation: strong setup overrides the time stop
             if claude:
@@ -269,13 +293,17 @@ class StopLossManager:
                     # Cancel the standing stop first so it can't fire on the freed shares.
                     orders = await self.alpaca.get_orders()
                     for order in orders:
-                        if (order.get("symbol") == trade.symbol and
-                                order.get("type") == "stop" and
-                                order.get("side") == "sell"):
+                        if (
+                            order.get("symbol") == trade.symbol
+                            and order.get("type") == "stop"
+                            and order.get("side") == "sell"
+                        ):
                             await self.alpaca.cancel_order(order["id"])
 
                     await self.alpaca.submit_order(
-                        symbol=trade.symbol, qty=qty, side="sell",
+                        symbol=trade.symbol,
+                        qty=qty,
+                        side="sell",
                         order_type="market",
                     )
                     pnl = (current - entry) * qty

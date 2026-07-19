@@ -1,5 +1,4 @@
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import structlog
 
@@ -10,6 +9,8 @@ logger = structlog.get_logger()
 
 
 class OrderManager:
+    """Tracks open orders and cancels ones that stall or fill only partially."""
+
     def __init__(self, alpaca: AlpacaClient, db: Database):
         self.alpaca = alpaca
         self.db = db
@@ -22,7 +23,7 @@ class OrderManager:
 
             for order in orders:
                 order_id = order.get("id", "")
-                created = order.get("created_at", "")
+                order.get("created_at", "")
                 symbol = order.get("symbol", "")
                 filled_qty = int(order.get("filled_qty", 0))
                 total_qty = int(order.get("qty", 0))
@@ -35,14 +36,22 @@ class OrderManager:
                 # Cancel if not filled after 5 minutes
                 if elapsed > 300:
                     if filled_qty == 0:
-                        logger.info("order_timeout_cancel", symbol=symbol,
-                                    order_id=order_id, elapsed=elapsed)
+                        logger.info(
+                            "order_timeout_cancel",
+                            symbol=symbol,
+                            order_id=order_id,
+                            elapsed=elapsed,
+                        )
                         await self.alpaca.cancel_order(order_id)
                         del self._order_timestamps[order_id]
                     elif filled_qty < total_qty * 0.5:
                         # Partial fill < 50%: cancel rest
-                        logger.info("order_partial_cancel", symbol=symbol,
-                                    filled=filled_qty, total=total_qty)
+                        logger.info(
+                            "order_partial_cancel",
+                            symbol=symbol,
+                            filled=filled_qty,
+                            total=total_qty,
+                        )
                         await self.alpaca.cancel_order(order_id)
                         del self._order_timestamps[order_id]
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import structlog
 
@@ -8,13 +8,27 @@ from storage.db import Database
 logger = structlog.get_logger()
 
 SECTOR_MAP = {
-    "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology",
-    "AMZN": "Consumer Discretionary", "META": "Technology", "NVDA": "Technology",
-    "TSLA": "Consumer Discretionary", "AMD": "Technology", "PLTR": "Technology",
-    "COIN": "Financials", "JPM": "Financials", "BAC": "Financials",
-    "JNJ": "Healthcare", "UNH": "Healthcare", "PFE": "Healthcare",
-    "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
-    "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples",
+    "AAPL": "Technology",
+    "MSFT": "Technology",
+    "GOOGL": "Technology",
+    "AMZN": "Consumer Discretionary",
+    "META": "Technology",
+    "NVDA": "Technology",
+    "TSLA": "Consumer Discretionary",
+    "AMD": "Technology",
+    "PLTR": "Technology",
+    "COIN": "Financials",
+    "JPM": "Financials",
+    "BAC": "Financials",
+    "JNJ": "Healthcare",
+    "UNH": "Healthcare",
+    "PFE": "Healthcare",
+    "XOM": "Energy",
+    "CVX": "Energy",
+    "COP": "Energy",
+    "PG": "Consumer Staples",
+    "KO": "Consumer Staples",
+    "PEP": "Consumer Staples",
 }
 
 
@@ -33,6 +47,7 @@ class PortfolioManager:
         # map, then "Unknown". Avoids dumping every unmapped name into one
         # fake "Unknown" sector that trips the 3-per-sector limit.
         from config.universe import get_sector_for
+
         sector = get_sector_for(symbol)
         if sector and sector != "Unknown":
             return sector
@@ -59,10 +74,11 @@ class PortfolioManager:
 
         # Track weekly drawdown
         weekday = datetime.utcnow().weekday()
-        if weekday == 0 or self._weekly_start_value is None:
-            if self._weekly_start_date != today or self._weekly_start_value is None:
-                self._weekly_start_value = equity
-                self._weekly_start_date = today
+        if (weekday == 0 or self._weekly_start_value is None) and (
+            self._weekly_start_date != today or self._weekly_start_value is None
+        ):
+            self._weekly_start_value = equity
+            self._weekly_start_date = today
 
         if self._weekly_start_value and self._weekly_start_value > 0:
             weekly_dd = (equity - self._weekly_start_value) / self._weekly_start_value
@@ -76,8 +92,9 @@ class PortfolioManager:
     # Hard per-position cap (test phase): no single name above 5% of equity.
     MAX_SINGLE_PCT = 0.05
 
-    def can_open_position(self, symbol: str, positions: list[dict],
-                          account: dict, intended_value: float = 0.0) -> bool:
+    def can_open_position(
+        self, symbol: str, positions: list[dict], account: dict, intended_value: float = 0.0
+    ) -> bool:
         """Gate a BUY before execution.
 
         - Blocks if a position in this symbol already exists (no averaging-in
@@ -100,34 +117,42 @@ class PortfolioManager:
 
         # 1. No adding to an existing position in the test phase
         if held:
-            logger.warning("order_blocked", symbol=symbol,
-                           reason="already_holding_no_averaging",
-                           existing_value=round(existing_value, 2))
+            logger.warning(
+                "order_blocked",
+                symbol=symbol,
+                reason="already_holding_no_averaging",
+                existing_value=round(existing_value, 2),
+            )
             return False
 
         # 2. Hard 5% cap on total resulting exposure
         projected_pct = (existing_value + intended_value) / equity
         if projected_pct > self.MAX_SINGLE_PCT:
-            logger.warning("order_blocked", symbol=symbol,
-                           reason="max_position_pct_exceeded",
-                           projected_pct=f"{projected_pct:.2%}",
-                           limit=f"{self.MAX_SINGLE_PCT:.0%}")
+            logger.warning(
+                "order_blocked",
+                symbol=symbol,
+                reason="max_position_pct_exceeded",
+                projected_pct=f"{projected_pct:.2%}",
+                limit=f"{self.MAX_SINGLE_PCT:.0%}",
+            )
             return False
 
         # 3. Hard portfolio-invested cap (default 80%)
         invested = sum(abs(float(p.get("market_value", 0))) for p in positions)
         projected_invested = (invested + intended_value) / equity
         if projected_invested > self.config.max_portfolio_invested:
-            logger.warning("order_blocked", symbol=symbol,
-                           reason="max_portfolio_invested_exceeded",
-                           projected=f"{projected_invested:.1%}",
-                           limit=f"{self.config.max_portfolio_invested:.0%}")
+            logger.warning(
+                "order_blocked",
+                symbol=symbol,
+                reason="max_portfolio_invested_exceeded",
+                projected=f"{projected_invested:.1%}",
+                limit=f"{self.config.max_portfolio_invested:.0%}",
+            )
             return False
 
         return True
 
-    def check_sector_limit(self, symbol: str, positions: list[dict],
-                           account: dict) -> bool:
+    def check_sector_limit(self, symbol: str, positions: list[dict], account: dict) -> bool:
         sector = self.get_sector(symbol)
         equity = float(account.get("equity", 0))
         if equity <= 0:
@@ -149,8 +174,7 @@ class PortfolioManager:
             return False
 
         if equity > 0 and sector_value / equity > self.config.max_sector_pct:
-            logger.info("sector_pct_limit", sector=sector,
-                        pct=f"{sector_value / equity:.1%}")
+            logger.info("sector_pct_limit", sector=sector, pct=f"{sector_value / equity:.1%}")
             return False
 
         return True

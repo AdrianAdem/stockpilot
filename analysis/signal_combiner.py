@@ -10,9 +10,22 @@ logger = structlog.get_logger()
 
 
 class SignalCombiner:
-    def __init__(self, strategies: list[Strategy], claude: ClaudeAnalyst,
-                 weight_claude: float = 0.20, min_score: float = 0.65,
-                 max_claude_calls: int = 12):
+    """Merges per-strategy signals into one score and adds the LLM verdict.
+
+    Strategy scores are averaged by strategy weight. Candidates that could still
+    clear the entry gate are sent to Claude; its confidence contributes
+    `weight_claude` of the final score. Symbols with conflicting BUY/SELL
+    signals are dropped.
+    """
+
+    def __init__(
+        self,
+        strategies: list[Strategy],
+        claude: ClaudeAnalyst,
+        weight_claude: float = 0.20,
+        min_score: float = 0.65,
+        max_claude_calls: int = 12,
+    ):
         self.strategies = strategies
         self.claude = claude
         self.weight_claude = weight_claude
@@ -20,22 +33,17 @@ class SignalCombiner:
         # Hard cap on Claude (Haiku+Sonnet) calls per scan to bound token cost.
         self.max_claude_calls = max_claude_calls
 
-    async def generate_combined_signals(self, universe: list[str],
-                                         tech_data: dict,
-                                         news=None, fred=None,
-                                         portfolio=None,
-                                         db=None) -> list[Signal]:
+    async def generate_combined_signals(
+        self, universe: list[str], tech_data: dict, news=None, fred=None, portfolio=None, db=None
+    ) -> list[Signal]:
         # Gather signals from all strategies
         all_strategy_signals: dict[str, list[Signal]] = {}
 
-        tasks = [
-            s.generate_signals(universe, tech_data, news=news)
-            for s in self.strategies
-        ]
+        tasks = [s.generate_signals(universe, tech_data, news=news) for s in self.strategies]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         per_strategy_counts: dict[str, int] = {}
-        for strategy, result in zip(self.strategies, results):
+        for strategy, result in zip(self.strategies, results, strict=False):
             if isinstance(result, Exception):
                 logger.error("strategy_error", strategy=strategy.name, error=str(result))
                 per_strategy_counts[strategy.name] = -1  # errored
@@ -47,8 +55,7 @@ class SignalCombiner:
                 all_strategy_signals[sig.symbol].append(sig)
 
         # P4: per-strategy signal counts every scan
-        logger.info("scan_strategy_counts",
-                    **{k: v for k, v in per_strategy_counts.items()})
+        logger.info("scan_strategy_counts", **dict(per_strategy_counts.items()))
 
         combined = []
         macro_data = fred.get_macro_summary() if fred else {}
@@ -58,7 +65,7 @@ class SignalCombiner:
         # the limited Claude budget is spent on the strongest candidates.
         scored = []
         for symbol, signals in all_strategy_signals.items():
-            actions = set(s.action for s in signals)
+            actions = {s.action for s in signals}
             if Action.BUY in actions and Action.SELL in actions:
                 logger.info("signal_conflict_skip", symbol=symbol)
                 continue
@@ -95,9 +102,12 @@ class SignalCombiner:
                 if claude_signal:
                     # Check action alignment
                     if claude_signal.action != best_signal.action:
-                        logger.info("claude_disagrees", symbol=symbol,
-                                   strategy_action=best_signal.action.value,
-                                   claude_action=claude_signal.action.value)
+                        logger.info(
+                            "claude_disagrees",
+                            symbol=symbol,
+                            strategy_action=best_signal.action.value,
+                            claude_action=claude_signal.action.value,
+                        )
                         if claude_signal.action == Action.SKIP:
                             continue
 
@@ -105,16 +115,19 @@ class SignalCombiner:
                     strategy_contrib = strategy_score * (1 - self.weight_claude)
                     final_score = strategy_contrib + claude_contrib
 
-                    combined.append(Signal(
-                        symbol=symbol,
-                        action=best_signal.action,
-                        score=round(final_score, 3),
-                        strategy=f"combined({strat_names}+claude)",
-                        target_price=claude_signal.target_price or best_signal.target_price,
-                        stop_loss_price=claude_signal.stop_loss_price or best_signal.stop_loss_price,
-                        timeframe=claude_signal.timeframe or best_signal.timeframe,
-                        reasoning=f"Strategies: {best_signal.reasoning} | Claude: {claude_signal.reasoning}",
-                    ))
+                    combined.append(
+                        Signal(
+                            symbol=symbol,
+                            action=best_signal.action,
+                            score=round(final_score, 3),
+                            strategy=f"combined({strat_names}+claude)",
+                            target_price=claude_signal.target_price or best_signal.target_price,
+                            stop_loss_price=claude_signal.stop_loss_price
+                            or best_signal.stop_loss_price,
+                            timeframe=claude_signal.timeframe or best_signal.timeframe,
+                            reasoning=f"Strategies: {best_signal.reasoning} | Claude: {claude_signal.reasoning}",
+                        )
+                    )
                 else:
                     # No Claude signal — distinguish API outage from "Claude said skip".
                     if not self.claude.api_healthy:
@@ -123,36 +136,41 @@ class SignalCombiner:
                         label = f"combined({strat_names}) [no claude confirm]"
                     final_score = strategy_score * 0.90
                     if final_score > 0.5:
-                        combined.append(Signal(
-                            symbol=symbol,
-                            action=best_signal.action,
-                            score=round(final_score, 3),
-                            strategy=label,
-                            target_price=best_signal.target_price,
-                            stop_loss_price=best_signal.stop_loss_price,
-                            timeframe=best_signal.timeframe,
-                            reasoning=best_signal.reasoning,
-                        ))
+                        combined.append(
+                            Signal(
+                                symbol=symbol,
+                                action=best_signal.action,
+                                score=round(final_score, 3),
+                                strategy=label,
+                                target_price=best_signal.target_price,
+                                stop_loss_price=best_signal.stop_loss_price,
+                                timeframe=best_signal.timeframe,
+                                reasoning=best_signal.reasoning,
+                            )
+                        )
             elif strategy_score > claude_gate:
                 # Above the gate but Claude budget spent this scan — still allow
                 # a strong strategy-only signal through (discounted).
                 strat_names = "+".join(sorted(s.strategy for s in signals))
                 final_score = strategy_score * 0.90
                 if final_score > 0.5:
-                    combined.append(Signal(
-                        symbol=symbol,
-                        action=best_signal.action,
-                        score=round(final_score, 3),
-                        strategy=f"combined({strat_names}) [claude budget spent]",
-                        target_price=best_signal.target_price,
-                        stop_loss_price=best_signal.stop_loss_price,
-                        timeframe=best_signal.timeframe,
-                        reasoning=best_signal.reasoning,
-                    ))
+                    combined.append(
+                        Signal(
+                            symbol=symbol,
+                            action=best_signal.action,
+                            score=round(final_score, 3),
+                            strategy=f"combined({strat_names}) [claude budget spent]",
+                            target_price=best_signal.target_price,
+                            stop_loss_price=best_signal.stop_loss_price,
+                            timeframe=best_signal.timeframe,
+                            reasoning=best_signal.reasoning,
+                        )
+                    )
 
         combined.sort(key=lambda s: s.score, reverse=True)
-        logger.info("combined_signals", count=len(combined),
-                     top=[(s.symbol, s.score) for s in combined[:5]])
+        logger.info(
+            "combined_signals", count=len(combined), top=[(s.symbol, s.score) for s in combined[:5]]
+        )
         return combined
 
     def _format_portfolio(self, positions: list[dict] | None) -> str:

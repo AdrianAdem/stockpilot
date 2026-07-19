@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 
 import httpx
 import structlog
@@ -62,16 +61,9 @@ Target: {f"${trade.take_profit:.2f}{target_pct}" if trade.take_profit else "N/A"
 Reasoning: {signal.reasoning[:100]}"""
         await self.send(text)
 
-    async def send_stop_loss(self, symbol: str, qty: int, price: float,
-                              loss: float, days_held: int):
-        text = f"""\U0001f534 <b>STOP-LOSS HIT</b>
-SOLD {qty}x {symbol} @ ${price:.2f}
-Loss: ${loss:.2f}
-Hold Time: {days_held} days"""
-        await self.send(text)
-
-    async def send_position_closed(self, symbol: str, qty: int, exit_price: float,
-                                    pnl: float, pnl_pct: float, days_held: int):
+    async def send_position_closed(
+        self, symbol: str, qty: int, exit_price: float, pnl: float, pnl_pct: float, days_held: int
+    ):
         emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
         text = f"""{emoji} <b>POSITION CLOSED</b>
 SOLD {qty}x {symbol} @ ${exit_price:.2f}
@@ -96,9 +88,6 @@ Open Positions: {summary.open_positions}/{summary.max_positions}"""
 
     async def send_error(self, error: str):
         await self.send(f"\U0001f534 <b>ERROR</b>\n{error[:500]}")
-
-    async def send_pause(self, reason: str):
-        await self.send(f"⚠️ <b>TRADING PAUSED</b>\n{reason}")
 
     # === COMMAND POLLING ===
 
@@ -198,7 +187,9 @@ Trading: {"PAUSED" if paused else "ACTIVE"}"""
             pnl = float(p.get("unrealized_pl", 0))
             pnl_pct = float(p.get("unrealized_plpc", 0)) * 100
             emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-            lines.append(f"{emoji} {sym}: {qty}x @ ${entry:.2f} | ${current:.2f} ({pnl_pct:+.1f}%) ${pnl:+.2f}")
+            lines.append(
+                f"{emoji} {sym}: {qty}x @ ${entry:.2f} | ${current:.2f} ({pnl_pct:+.1f}%) ${pnl:+.2f}"
+            )
 
         await self.tg.send("\n".join(lines))
 
@@ -238,7 +229,9 @@ Trading: {"PAUSED" if paused else "ACTIVE"}"""
             if qty > 0:
                 try:
                     await self.bot.alpaca.submit_order(
-                        symbol=symbol, qty=qty, side="sell",
+                        symbol=symbol,
+                        qty=qty,
+                        side="sell",
                         order_type="market",
                     )
                     closed += 1

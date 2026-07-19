@@ -1,18 +1,23 @@
-alpaca-trade-api>=3.2.0
-anthropic>=0.42.0
+# Core
+httpx>=0.27.0            # every API client (Alpaca, SEC EDGAR, FRED, Telegram)
+anthropic>=0.42.0        # Claude Haiku + Sonnet analysis
+pydantic>=2.9.0          # configuration and domain models
+python-dotenv>=1.0.0     # .env loading
+structlog>=24.4.0        # structured JSON logging
+
+# Data / indicators
 pandas>=2.2.0,<3.0
 numpy>=1.26,<2.3
-fredapi>=0.5.0
-python-telegram-bot>=21.0
+lxml>=5.3.0              # required by pandas.read_html (S&P 500 universe)
+feedparser>=6.0.0        # news RSS feeds
+
+# Storage
+aiosqlite>=0.20.0
+
+# Dashboard
 fastapi>=0.115.0
 uvicorn>=0.30.0
-jinja2>=3.1.0
-aiosqlite>=0.20.0
-httpx>=0.27.0
+jinja2>=3.1.0            # FastAPI Jinja2Templates
+
+# Backtest reporting
 matplotlib>=3.9.0
-feedparser>=6.0.0
-python-dotenv>=1.0.0
-pydantic>=2.9.0
-structlog>=24.4.0
-beautifulsoup4>=4.12.0
-lxml>=5.3.0

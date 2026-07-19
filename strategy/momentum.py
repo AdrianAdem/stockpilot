@@ -13,8 +13,9 @@ class MomentumStrategy(Strategy):
     def __init__(self, weight: float = 0.30):
         self.weight = weight
 
-    async def generate_signals(self, universe: list[str], tech_data: dict,
-                               **kwargs) -> list[Signal]:
+    async def generate_signals(
+        self, universe: list[str], tech_data: dict, **kwargs
+    ) -> list[Signal]:
         signals = []
 
         for symbol in universe:
@@ -26,22 +27,26 @@ class MomentumStrategy(Strategy):
             sell_score = self._check_sell(td)
 
             if buy_score > 0.3:
-                signals.append(Signal(
-                    symbol=symbol,
-                    action=Action.BUY,
-                    score=buy_score,
-                    strategy=self.name,
-                    stop_loss_price=self._calc_stop(td, "long"),
-                    reasoning=self._buy_reasoning(td),
-                ))
+                signals.append(
+                    Signal(
+                        symbol=symbol,
+                        action=Action.BUY,
+                        score=buy_score,
+                        strategy=self.name,
+                        stop_loss_price=self._calc_stop(td, "long"),
+                        reasoning=self._buy_reasoning(td),
+                    )
+                )
             elif sell_score > 0.3:
-                signals.append(Signal(
-                    symbol=symbol,
-                    action=Action.SELL,
-                    score=sell_score,
-                    strategy=self.name,
-                    reasoning=self._sell_reasoning(td),
-                ))
+                signals.append(
+                    Signal(
+                        symbol=symbol,
+                        action=Action.SELL,
+                        score=sell_score,
+                        strategy=self.name,
+                        reasoning=self._sell_reasoning(td),
+                    )
+                )
 
         logger.info("momentum_signals", count=len(signals))
         return signals
@@ -57,7 +62,7 @@ class MomentumStrategy(Strategy):
             center = (MOMENTUM.rsi_low + MOMENTUM.rsi_high) / 2  # ~52.5
             half = (MOMENTUM.rsi_high - MOMENTUM.rsi_low) / 2
             closeness = 1 - abs(rsi - center) / half  # 1 at center, 0 at edges
-            score += 0.25 * (0.6 + 0.4 * closeness)    # 0.15-0.25
+            score += 0.25 * (0.6 + 0.4 * closeness)  # 0.15-0.25
         elif rsi and rsi < MOMENTUM.rsi_low:
             score += 0.08  # oversold-but-recovering, weak credit
 
@@ -76,8 +81,8 @@ class MomentumStrategy(Strategy):
                 score += 0.05
             price, sma50 = td.get("price"), td.get("SMA_50")
             if price and sma50 and sma50 > 0:
-                ext = (price - sma50) / sma50           # how far above SMA50
-                score += min(max(ext, 0), 0.05) * 0.6   # small bonus, capped
+                ext = (price - sma50) / sma50  # how far above SMA50
+                score += min(max(ext, 0), 0.05) * 0.6  # small bonus, capped
         elif td.get("above_SMA50"):
             score += 0.12
 
