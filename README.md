@@ -2,8 +2,9 @@
 
 Autonomous equity trading bot for Alpaca paper trading — combines technical strategies, 13F institutional filings and a two-tier LLM analysis layer behind a hard risk-management gate.
 
-> ⚠️ **Learning and research project. Paper/demo accounts only. Not investment advice.**
-> The client refuses to start against a live Alpaca endpoint (see [Safety](#safety)). Nothing here is a recommendation to buy or sell any security. Backtested performance says nothing about future results.
+> **Status: paper-trading validation.** The system is built for live execution, but is currently running against an Alpaca paper account while the strategy is being forward-tested. The client is deliberately hard-locked to the paper endpoint (see [Safety](#safety)); enabling live trading is an explicit, manual change.
+>
+> **Not investment advice.** Nothing here is a recommendation to buy or sell any security. Backtested and paper results do not predict future performance. If you run this with real money, that is your decision and your risk.
 
 ## Problem
 
@@ -167,8 +168,9 @@ Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/ki
 
 ## Safety
 
-- `AlpacaClient` raises on construction if `ALPACA_BASE_URL` is not the paper endpoint; `verify_paper_account()` runs at startup.
+- **Paper lock (current phase):** `AlpacaClient` raises on construction if `ALPACA_BASE_URL` is not the paper endpoint, and `verify_paper_account()` runs at startup. Removing this guard is a conscious one-line decision, which is exactly the point — live trading should never be reachable by a stray config value.
 - Drawdown breakers halt new entries for the day (−2%) and pause the bot entirely for the week (−5%).
+- Every position carries a broker-side GTC stop; a reconciliation pass each cycle guarantees exactly one full-size stop per position, so a partial fill or a manual change cannot leave shares unprotected.
 - Graceful shutdown cancels all open orders on `SIGINT`/`SIGTERM`.
 - `.env`, logs and the SQLite database are gitignored; no credentials are committed.
 
@@ -188,7 +190,9 @@ dashboard/   FastAPI app + Jinja2 templates
 
 ## Disclaimer
 
-This is a personal learning and research project. It runs against **paper/demo accounts only** and is not intended or suitable for live trading. It is **not investment advice** and not a recommendation to buy or sell any security. Backtest results are historical simulations built on modelling assumptions and do not predict future performance. Use at your own risk.
+The system is designed for live execution but is currently in a **paper-trading validation phase**. Going live is a deliberate configuration change, not a default — the Alpaca client refuses any non-paper endpoint as shipped.
+
+This is **not investment advice** and not a recommendation to buy or sell any security. Backtest results are historical simulations built on explicit modelling assumptions (slippage, next-open fills, intraday stop checks) and neither they nor paper results predict future performance. Trading equities involves risk of loss. If you deploy this against a funded account, you do so entirely at your own risk and responsibility.
 
 ## License
 
