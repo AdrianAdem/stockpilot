@@ -17,9 +17,10 @@ StockPilot separates those concerns. Four independent signal sources are merged 
 - **Four signal sources, weighted** — momentum, mean reversion, 13F whale-following and an LLM analyst, merged into a single score with a configurable entry threshold.
 - **Two-tier LLM analysis** — Claude Haiku screens candidates cheaply; only survivors reach Claude Sonnet for full analysis (technicals + news + institutional flow + macro). A per-scan call budget caps token spend; the static system prompt is cached.
 - **13F institutional tracking** — parses SEC EDGAR filings for 8 funds (Berkshire Hathaway, Bridgewater, Soros, Renaissance Technologies, Citadel, Pershing Square, Third Point, Appaloosa), diffs consecutive quarters and resolves issuer names to tradeable tickers to build a buy-consensus signal.
+- **Risk-based position sizing** — each trade is sized so that being stopped out costs the same fraction of equity (default 0.25%), so a wide-stop name gets a small position rather than the same weight as a tight-stop one. Bounded by a hard 5% per-position cap.
 - **Hard risk layer** — per-position cap, max concurrent positions, GICS sector limits, minimum cash reserve, daily and weekly drawdown circuit breakers, and no averaging into an existing position.
-- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. Stops are real GTC orders at the broker, updated by atomic order replacement (no unprotected window). A reconciliation pass guarantees every open position is covered by exactly one full-size stop.
-- **Backtesting** — no-lookahead engine (signal on day *i* fills at day *i+1* open; stops checked against intraday lows), plus standalone harnesses that isolate exit models and position-sizing models for controlled A/B comparison.
+- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. Stops are real GTC orders at the broker, so they still fire while the bot is offline. Updates prefer an atomic order replace and fall back to cancel-and-recreate if the broker rejects it; a reconciliation pass — running inside and outside market hours — guarantees every open position is covered by exactly one full-size stop.
+- **Backtesting** — no-lookahead engine (signal on day *i* fills at day *i+1* open; stops checked against intraday lows), plus standalone harnesses that isolate exit models and position-sizing models for controlled A/B comparison. See [Method](#method).
 - **Operations** — FastAPI dashboard, Telegram notifications and remote control, structured JSON logging, per-call API cost tracking.
 
 ## Tech stack
@@ -150,14 +151,44 @@ docker compose logs -f
 Backtesting:
 
 ```bash
-# Compare exit models: fixed 2-stage vs ATR trailing at several factors
+# Exit models: fixed 2-stage vs continuous ATR trailing at several factors
 python -m backtest.exit_compare
 
-# Compare position-sizing models: flat vs volatility-scaled
+# Position sizing: flat percentage vs risk-based, cooldown, portfolio stop
+python -m backtest.risk_sizing_compare
+
+# Position sizing: flat vs volatility-scaled (earlier experiment)
 python -m backtest.sizing_compare
 ```
 
 Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/kill`.
+
+## Method
+
+Parameters are chosen by controlled backtest, not intuition. Each experiment
+freezes everything except the variable under test, and the trade count is
+reported so an unchanged entry set is verifiable. Two examples:
+
+**Exit model** — the original two-stage trailing stop returned more on paper
+but carried an −83.7% drawdown. Continuous ATR trailing at N=2.5 more than
+doubled the Sharpe ratio (0.65 → 1.38) and cut the drawdown to −15.5%.
+
+**Position sizing** — flat percentage sizing gave a high-volatility name the
+same portfolio weight as a quiet one, so it risked 3–4× more per trade. Sizing
+by stop distance left the Sharpe ratio unchanged but halved the worst single
+trade (−$506 → −$267). It shipped for the risk reduction, not for return.
+
+Rejected changes are documented too, including a portfolio-level stop that
+looked appealing and tested at −0.49 Sharpe.
+
+Full results, including the reasoning and the rejected variants:
+**[docs/BACKTESTS.md](docs/BACKTESTS.md)**
+
+Backtests only decide whether a change ships. Whether the strategy actually
+works is a separate question, answered by forward testing on unseen data —
+tracked in [FORWARD-TEST.md](FORWARD-TEST.md) against pass/fail criteria that
+were fixed before data collection began. The most recent completed run failed
+3 of 6 criteria; that is recorded there rather than quietly dropped.
 
 ## Screenshots
 
