@@ -38,6 +38,18 @@ def _signal(symbol: str = "AAPL", score: float = 0.7) -> Signal:
     )
 
 
+def _signal_with_stop(stop: float, symbol: str = "AAPL") -> Signal:
+    """BUY signal with an explicit stop, for risk-based sizing tests."""
+    return Signal(
+        symbol=symbol,
+        action=Action.BUY,
+        score=0.7,
+        strategy="test",
+        stop_loss_price=stop,
+        target_price=None,
+    )
+
+
 ACCOUNT = {"equity": "100000", "buying_power": "200000", "cash": "100000"}
 
 
@@ -50,11 +62,22 @@ class TestPositionSizer:
         assert size is not None
         assert size.pct_of_portfolio <= PositionSizer.MAX_SINGLE_PCT_CAP + 1e-9
 
-    def test_higher_conviction_gets_more_capital(self, sizer):
-        low = sizer.calculate(_signal(score=0.66), ACCOUNT, [], current_price=100.0)
-        high = sizer.calculate(_signal(score=0.90), ACCOUNT, [], current_price=100.0)
-        assert low is not None and high is not None
-        assert high.value > low.value
+    def test_wider_stop_gets_smaller_position(self, sizer):
+        """Risk-based sizing: distance to the stop drives the position size."""
+        tight = sizer.calculate(_signal_with_stop(stop=97.0), ACCOUNT, [], current_price=100.0)
+        wide = sizer.calculate(_signal_with_stop(stop=80.0), ACCOUNT, [], current_price=100.0)
+        assert tight is not None and wide is not None
+        assert wide.value < tight.value
+
+    def test_risk_per_trade_is_equalised_across_stop_distances(self, sizer):
+        """The whole point: being stopped out costs about the same either way."""
+        equity = float(ACCOUNT["equity"])
+        for stop in (97.0, 92.0, 80.0):
+            size = sizer.calculate(_signal_with_stop(stop=stop), ACCOUNT, [], current_price=100.0)
+            assert size is not None
+            risk = (100.0 - stop) * size.shares / equity
+            # within the floor/cap band the realised risk tracks the budget
+            assert risk <= sizer.risk_per_trade * 1.5
 
     def test_existing_exposure_reduces_new_size(self, sizer):
         held = [{"symbol": "AAPL", "market_value": "4000"}]

@@ -11,7 +11,9 @@ structlog.configure(
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.add_log_level,
         structlog.processors.StackInfoRenderer(),
-        structlog.dev.ConsoleRenderer() if sys.stdout.isatty() else structlog.processors.JSONRenderer(),
+        structlog.dev.ConsoleRenderer()
+        if sys.stdout.isatty()
+        else structlog.processors.JSONRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(20),
 )
@@ -55,9 +57,11 @@ class StockPilot:
 
         self.alpaca = AlpacaClient(self.config.alpaca)
         account = await self.alpaca.verify_paper_account()
-        logger.info("paper_account_confirmed",
-                     equity=account.get("equity"),
-                     buying_power=account.get("buying_power"))
+        logger.info(
+            "paper_account_confirmed",
+            equity=account.get("equity"),
+            buying_power=account.get("buying_power"),
+        )
 
         self.sec = SECFilingsClient(self.config.sec_user_agent)
         self.technical = TechnicalAnalysis()
@@ -76,9 +80,13 @@ class StockPilot:
 
         # Risk management
         self.portfolio_manager = PortfolioManager(self.config.risk, self.db)
-        self.position_sizer = PositionSizer(self.config.risk)
+        self.position_sizer = PositionSizer(
+            self.config.risk,
+            risk_per_trade=float(os.getenv("RISK_PER_TRADE", "0.0025")),
+        )
         self.stop_manager = StopLossManager(
-            self.alpaca, self.db,
+            self.alpaca,
+            self.db,
             trailing_factor=float(os.getenv("ATR_TRAILING_FACTOR", "2.5")),
             initial_stop_factor=float(os.getenv("ATR_INITIAL_STOP_FACTOR", "2.0")),
             telegram=self.telegram,
@@ -99,7 +107,8 @@ class StockPilot:
             ),
         ]
         self.combiner = SignalCombiner(
-            strategies, self.claude,
+            strategies,
+            self.claude,
             weight_claude=self.config.strategy.claude_weight,
             min_score=self.config.strategy.min_signal_score,
             max_claude_calls=int(os.getenv("MAX_CLAUDE_CALLS_PER_SCAN", "12")),
@@ -108,9 +117,11 @@ class StockPilot:
         # Register Telegram commands
         self.cmd_handler = TelegramCommandHandler(self.telegram, self)
 
-        await self.telegram.send("\U0001f680 <b>StockPilot started</b>\n"
-                                  f"Account: ${account.get('equity', '?')}\n"
-                                  f"Mode: PAPER TRADING")
+        await self.telegram.send(
+            "\U0001f680 <b>StockPilot started</b>\n"
+            f"Account: ${account.get('equity', '?')}\n"
+            f"Mode: PAPER TRADING"
+        )
 
         # Migrate existing open positions to ATR trailing stops (upward only),
         # then reconcile so EVERY position ends with a live, full-qty stop
@@ -148,6 +159,7 @@ class StockPilot:
 
         # Background tasks: Dashboard + Telegram polling
         from dashboard.app import start_dashboard
+
         asyncio.create_task(start_dashboard(self.db))
         asyncio.create_task(self.telegram.start_polling())
         logger.info("background_tasks_started", dashboard="http://0.0.0.0:8000")
@@ -175,8 +187,11 @@ class StockPilot:
         try:
             closed = await self.alpaca.get_orders(status="closed")
             for o in closed:
-                if (o.get("side") == "sell" and o.get("status") == "filled"
-                        and o.get("filled_avg_price")):
+                if (
+                    o.get("side") == "sell"
+                    and o.get("status") == "filled"
+                    and o.get("filled_avg_price")
+                ):
                     sym = o.get("symbol")
                     if sym not in exit_px:  # closed orders come newest-first
                         exit_px[sym] = float(o["filled_avg_price"])
@@ -189,11 +204,15 @@ class StockPilot:
             pnl_pct = (price - t.price) / t.price * 100 if t.price else 0
             days = (datetime.utcnow() - t.timestamp).days
             await self.db.close_trade(t.order_id, price, pnl)
-            logger.info("position_closed_synced", symbol=t.symbol, qty=t.qty,
-                        exit=round(price, 2), pnl=round(pnl, 2))
+            logger.info(
+                "position_closed_synced",
+                symbol=t.symbol,
+                qty=t.qty,
+                exit=round(price, 2),
+                pnl=round(pnl, 2),
+            )
             if notify:
-                await self.telegram.send_position_closed(
-                    t.symbol, t.qty, price, pnl, pnl_pct, days)
+                await self.telegram.send_position_closed(t.symbol, t.qty, price, pnl, pnl_pct, days)
 
     async def send_daily_summary(self):
         """End-of-day report built from live account data + today's DB activity."""
@@ -206,14 +225,16 @@ class StockPilot:
 
         today = datetime.utcnow().strftime("%Y-%m-%d")
         cur = await self.db._db.execute(
-            "SELECT side, COUNT(*) FROM trades WHERE timestamp LIKE ? GROUP BY side",
-            (f"{today}%",))
+            "SELECT side, COUNT(*) FROM trades WHERE timestamp LIKE ? GROUP BY side", (f"{today}%",)
+        )
         by_side = {r[0]: r[1] for r in await cur.fetchall()}
 
         cur = await self.db._db.execute(
             "SELECT COUNT(*), COALESCE(SUM(pnl),0), "
             "SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) "
-            "FROM trades WHERE closed_at LIKE ?", (f"{today}%",))
+            "FROM trades WHERE closed_at LIKE ?",
+            (f"{today}%",),
+        )
         n_closed, closed_pnl, closed_wins = await cur.fetchone()
 
         api_cost = await self.db.get_api_cost_today()
@@ -234,11 +255,14 @@ class StockPilot:
             f"realisiert ${closed_pnl or 0:+,.0f}",
         ]
         if best is not None:
-            lines.append(f"Bester: {best['symbol']} "
-                         f"{float(best.get('unrealized_plpc', 0))*100:+.1f}%")
+            lines.append(
+                f"Bester: {best['symbol']} {float(best.get('unrealized_plpc', 0)) * 100:+.1f}%"
+            )
         if worst is not None and worst is not best:
-            lines.append(f"Schlechtester: {worst['symbol']} "
-                         f"{float(worst.get('unrealized_plpc', 0))*100:+.1f}%")
+            lines.append(
+                f"Schlechtester: {worst['symbol']} "
+                f"{float(worst.get('unrealized_plpc', 0)) * 100:+.1f}%"
+            )
         lines.append(f"API-Kosten heute: ${api_cost:.2f}")
 
         await self.telegram.send("\n".join(lines))
@@ -266,8 +290,10 @@ class StockPilot:
             # Daily summary on the open->closed TRANSITION. The old 10-minute
             # near-close window was never hit (the loop only scans every 15 min),
             # so no summary ever fired. Fires once, only on days we actually traded.
-            if (getattr(self, "_market_was_open_on", None) == today
-                    and getattr(self, "_summary_sent_on", None) != today):
+            if (
+                getattr(self, "_market_was_open_on", None) == today
+                and getattr(self, "_summary_sent_on", None) != today
+            ):
                 self._summary_sent_on = today
                 try:
                     await self.send_daily_summary()
@@ -326,8 +352,7 @@ class StockPilot:
         if not await self.portfolio_manager.can_trade(account, positions):
             logger.warning("risk_limits_no_trade")
             # Hourly heartbeat even while halted — so it never looks dead.
-            await self._maybe_heartbeat(equity, len(positions),
-                                        "⏸ PAUSIERT (Risk-Limit)")
+            await self._maybe_heartbeat(equity, len(positions), "⏸ PAUSIERT (Risk-Limit)")
             await asyncio.sleep(self.config.strategy.scan_interval_seconds)
             return
 
@@ -378,8 +403,9 @@ class StockPilot:
         # Log EVERY combined signal (not just executed trades) so Claude's
         # contribution is auditable even when no trade results.
         for sig in all_signals:
-            await self.db.log_signal(sig.symbol, sig.action.value, sig.score,
-                                     sig.strategy, sig.reasoning)
+            await self.db.log_signal(
+                sig.symbol, sig.action.value, sig.score, sig.strategy, sig.reasoning
+            )
 
         trades_executed = 0
         for sig in all_signals:
@@ -418,9 +444,11 @@ class StockPilot:
         top = all_signals[0] if all_signals else None
         top_str = f"{top.symbol} {top.score:.2f}" if top else "keine"
         await self._maybe_heartbeat(
-            float(account.get("equity", 0)), len(positions),
+            float(account.get("equity", 0)),
+            len(positions),
             f"Signale {len(all_signals)} (Top: {top_str}, Schwelle "
-            f"{self.config.strategy.min_signal_score})")
+            f"{self.config.strategy.min_signal_score})",
+        )
 
         # 12. (Daily summary now fires on the market open->closed transition —
         #      the old 10-min near-close window never hit the 15-min scan loop.)
