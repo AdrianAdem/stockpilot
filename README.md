@@ -1,10 +1,20 @@
-<img src="docs/hero.png" alt="stockpilot — the gate can refuse it" width="100%"/>
+<div align="center">
 
-<p><img src="https://img.shields.io/badge/license-MIT-0E1116?style=flat-square" alt="" height="20"/> <img src="https://img.shields.io/badge/python-3.11+-0E1116?style=flat-square" alt="" height="20"/> <img src="https://img.shields.io/badge/execution-paper%20only-E23D2E?style=flat-square" alt="" height="20"/> <img src="https://img.shields.io/badge/backtest-no%20lookahead-0E1116?style=flat-square" alt="" height="20"/></p>
+<img src="docs/hero.png" alt="stockpilot — autonomous equity agent with a hard risk gate" width="100%"/>
+
+### An autonomous equity agent for Alpaca whose risk layer is allowed to veto its own strongest signal.
+
+<p>
+<img src="https://img.shields.io/badge/license-MIT-0E1116?style=for-the-badge" alt="" height="30"/>
+<img src="https://img.shields.io/badge/python-3.11%2B-0E1116?style=for-the-badge&logo=python&logoColor=white" alt="" height="30"/>
+<img src="https://img.shields.io/badge/execution-paper%20only-E23D2E?style=for-the-badge" alt="" height="30"/>
+<img src="https://img.shields.io/badge/risk%20per%20trade-0.25%25-0E1116?style=for-the-badge" alt="" height="30"/>
+<img src="https://img.shields.io/badge/backtest-no%20lookahead-0E1116?style=for-the-badge" alt="" height="30"/>
+</p>
+
+</div>
 
 **Contents** &nbsp;·&nbsp; [Problem](#problem) &nbsp;·&nbsp; [Features](#features) &nbsp;·&nbsp; [Screenshots](#screenshots) &nbsp;·&nbsp; [Tech stack](#tech-stack) &nbsp;·&nbsp; [Architecture](#architecture) &nbsp;·&nbsp; [Installation](#installation) &nbsp;·&nbsp; [Usage](#usage) &nbsp;·&nbsp; [Method](#method) &nbsp;·&nbsp; [Safety](#safety) &nbsp;·&nbsp; [Project layout](#project-layout) &nbsp;·&nbsp; [Disclaimer](#disclaimer) &nbsp;·&nbsp; [License](#license)
-
-Autonomous equity trading bot for Alpaca paper trading — combines technical strategies, 13F institutional filings and a two-tier LLM analysis layer behind a hard risk-management gate.
 
 > **Status: paper-trading validation.** The system is built for live execution, but is currently running against an Alpaca paper account while the strategy is being forward-tested. The client is deliberately hard-locked to the paper endpoint (see [Safety](#safety)); enabling live trading is an explicit, manual change.
 >
