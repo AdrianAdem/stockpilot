@@ -5,12 +5,10 @@
 ### An autonomous equity agent for Alpaca whose risk layer is allowed to veto its own strongest signal.
 
 <p>
-<img src="https://img.shields.io/badge/license-MIT-0E1116?style=for-the-badge" alt="" height="30"/>
-<img src="https://img.shields.io/badge/python-3.11%2B-0E1116?style=for-the-badge&logo=python&logoColor=white" alt="" height="30"/>
-<img src="https://img.shields.io/badge/execution-paper%20only-E23D2E?style=for-the-badge" alt="" height="30"/>
-<img src="https://img.shields.io/badge/risk%20per%20trade-0.25%25-0E1116?style=for-the-badge" alt="" height="30"/>
-<img src="https://img.shields.io/badge/backtest-no%20lookahead-0E1116?style=for-the-badge" alt="" height="30"/>
+<img src="https://img.shields.io/badge/license-MIT-E23D2E?style=for-the-badge&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/execution-paper%20only-E23D2E?style=for-the-badge&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/risk%20per%20trade-0.25%25-8A94A2?style=for-the-badge&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/backtest-no%20lookahead-8A94A2?style=for-the-badge&labelColor=161A21" alt=""/>
 </p>
+
+<br>
 
 </div>
 
