@@ -1,28 +1,36 @@
 <div align="center">
 
-<img src="docs/hero.png" alt="stockpilot — autonomous equity agent with a hard risk gate" width="100%"/>
-
-### An autonomous equity agent for Alpaca whose risk layer is allowed to veto its own strongest signal.
-
-<p>
-<img src="https://img.shields.io/badge/license-MIT-E23D2E?style=for-the-badge&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/execution-paper%20only-E23D2E?style=for-the-badge&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/risk%20per%20trade-0.25%25-8A94A2?style=for-the-badge&labelColor=161A21" alt=""/> <img src="https://img.shields.io/badge/backtest-no%20lookahead-8A94A2?style=for-the-badge&labelColor=161A21" alt=""/>
-</p>
+<img src="docs/hero-v2.png" alt="StockPilot — Equity research, explainable signals and risk controls — tested through paper trading." width="100%"/>
 
 <br>
 
-</div>
+### Equity research, explainable signals and risk controls — tested through paper trading.
 
-**Contents** &nbsp;·&nbsp; [Problem](#problem) &nbsp;·&nbsp; [Features](#features) &nbsp;·&nbsp; [Screenshots](#screenshots) &nbsp;·&nbsp; [Tech stack](#tech-stack) &nbsp;·&nbsp; [Architecture](#architecture) &nbsp;·&nbsp; [Installation](#installation) &nbsp;·&nbsp; [Usage](#usage) &nbsp;·&nbsp; [Method](#method) &nbsp;·&nbsp; [Safety](#safety) &nbsp;·&nbsp; [Project layout](#project-layout) &nbsp;·&nbsp; [Disclaimer](#disclaimer) &nbsp;·&nbsp; [License](#license)
+<br>
+
+<a href="#installation"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python: 3.11+"/></a> <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-D6A85A?style=for-the-badge" alt="License: MIT"/></a> <a href="#safety"><img src="https://img.shields.io/badge/Execution-Paper-D6A85A?style=for-the-badge" alt="Execution: Paper"/></a> <a href="https://github.com/AdrianAdem/stockpilot"><img src="https://img.shields.io/badge/Source-GitHub-737C88?style=for-the-badge&logo=github&logoColor=white" alt="Source: GitHub"/></a>
+
+<br><br>
+
+<a href="#screenshots">Screenshots</a> &nbsp; · &nbsp; <a href="#installation">Get started</a> &nbsp; · &nbsp; <a href="#license">License</a>
+
+<br><br>
+
+</div>
 
 > **Status: paper-trading validation.** The system is built for live execution, but is currently running against an Alpaca paper account while the strategy is being forward-tested. The client is deliberately hard-locked to the paper endpoint (see [Safety](#safety)); enabling live trading is an explicit, manual change.
 >
 > **Not investment advice.** Nothing here is a recommendation to buy or sell any security. Backtested and paper results do not predict future performance. If you run this with real money, that is your decision and your risk.
+
+<br>
 
 ## Problem
 
 Most hobby trading bots are a single indicator wired to a market order. That fails in two places: signal quality (one indicator is noise) and risk (nothing stops a position from growing until it dominates the portfolio).
 
 StockPilot separates those concerns. Four independent signal sources are merged into one weighted score, and every order then has to clear a risk layer that owns position sizing, sector exposure, drawdown limits and exits. A signal can be strong and still be rejected — that is intended behaviour, not a bug.
+
+<br>
 
 ## Features
 
@@ -31,15 +39,20 @@ StockPilot separates those concerns. Four independent signal sources are merged 
 - **13F institutional tracking** — parses SEC EDGAR filings for 8 funds (Berkshire Hathaway, Bridgewater, Soros, Renaissance Technologies, Citadel, Pershing Square, Third Point, Appaloosa), diffs consecutive quarters and resolves issuer names to tradeable tickers to build a buy-consensus signal.
 - **Risk-based position sizing** — each trade is sized so that being stopped out costs the same fraction of equity (default 0.25%), so a wide-stop name gets a small position rather than the same weight as a tight-stop one. Bounded by a hard 5% per-position cap.
 - **Hard risk layer** — per-position cap, max concurrent positions, GICS sector limits, minimum cash reserve, daily and weekly drawdown circuit breakers, and no averaging into an existing position.
-- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. Stops are real GTC orders at the broker, so they still fire while the bot is offline. Updates prefer an atomic order replace and fall back to cancel-and-recreate if the broker rejects it; a reconciliation pass — running inside and outside market hours — guarantees every open position is covered by exactly one full-size stop.
+- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. Stops are submitted as broker-side GTC orders. Protection depends on those orders remaining accepted and open; graceful shutdown cancels open orders. Updates prefer an atomic order replace and fall back to cancel-and-recreate if the broker rejects it; a reconciliation pass — running inside and outside market hours — aims to reconcile each open position to one full-size stop; broker errors and the interval between passes can leave gaps.
 - **Backtesting** — no-lookahead engine (signal on day *i* fills at day *i+1* open; stops checked against intraday lows), plus standalone harnesses that isolate exit models and position-sizing models for controlled A/B comparison. See [Method](#method).
 - **Operations** — FastAPI dashboard, Telegram notifications and remote control, structured JSON logging, per-call API cost tracking.
+
+<br>
 
 ## Screenshots
 
 **Portfolio overview** — open positions with their live ATR trailing stops and the strategies that produced each entry. The `[no claude confirm]` tag marks entries the LLM layer declined to endorse, so the provenance of every position stays visible.
 
 ![Dashboard](docs/dashboard.png)
+
+<details>
+<summary>More product screens and details</summary>
 
 **Whale tracker** — 13F filings parsed from SEC EDGAR, diffed against the previous quarter and resolved to tradeable tickers.
 
@@ -49,20 +62,16 @@ StockPilot separates those concerns. Four independent signal sources are merged 
 
 ![Signals](docs/signals.png)
 
+</details>
+
+<br>
+
 ## Tech stack
 
-![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
-![asyncio](https://img.shields.io/badge/asyncio-fully%20async-3776AB)
-![pandas](https://img.shields.io/badge/pandas-2.x-150458?logo=pandas&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-dashboard-009688?logo=fastapi&logoColor=white)
-![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063)
-![SQLite](https://img.shields.io/badge/SQLite-aiosqlite-003B57?logo=sqlite&logoColor=white)
-![Claude](https://img.shields.io/badge/Claude-Haiku%20%2B%20Sonnet-D97757)
-![Alpaca](https://img.shields.io/badge/Alpaca-paper%20trading-FFD700)
-![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green)
 
 Fully async (`asyncio` + `httpx`). Technical indicators (RSI, MACD, Bollinger Bands, SMA 50/200, ATR, volume ratio) are implemented directly on pandas/numpy — no TA library dependency. Pydantic models for configuration and domain objects.
+
+<br>
 
 ## Architecture
 
@@ -120,6 +129,8 @@ flowchart TB
 
 The main loop runs every 15 minutes while the market is open: reconcile broker-side exits → update trailing stops → evaluate time stops → risk check → screen universe → generate signals → size and execute.
 
+<br>
+
 ## Installation
 
 Requires Python 3.11+.
@@ -158,6 +169,8 @@ Tuning knobs (defaults shipped in `.env.example`):
 | `MAX_CLAUDE_CALLS_PER_SCAN` | `12` | Token-cost ceiling per scan |
 | `MOMENTUM_WEIGHT` / `MEAN_REVERSION_WEIGHT` / `WHALE_FOLLOW_WEIGHT` / `CLAUDE_WEIGHT` | `0.30` / `0.25` / `0.25` / `0.20` | Signal blend |
 
+<br>
+
 ## Usage
 
 ```bash
@@ -189,6 +202,8 @@ python -m backtest.sizing_compare
 
 Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/kill`.
 
+<br>
+
 ## Method
 
 Parameters are chosen by controlled backtest, not intuition. Each experiment
@@ -216,13 +231,17 @@ tracked in [FORWARD-TEST.md](FORWARD-TEST.md) against pass/fail criteria that
 were fixed before data collection began. The most recent completed run failed
 3 of 6 criteria; that is recorded there rather than quietly dropped.
 
+<br>
+
 ## Safety
 
 - **Paper lock (current phase):** `AlpacaClient` raises on construction if `ALPACA_BASE_URL` is not the paper endpoint, and `verify_paper_account()` runs at startup. Removing this guard is a conscious one-line decision, which is exactly the point — live trading should never be reachable by a stray config value.
 - Drawdown breakers halt new entries for the day (−2%) and pause the bot entirely for the week (−5%).
-- Every position carries a broker-side GTC stop; a reconciliation pass each cycle guarantees exactly one full-size stop per position, so a partial fill or a manual change cannot leave shares unprotected.
+- The system submits broker-side GTC stops and reconciles coverage each cycle. This is not a continuous coverage guarantee: partial fills, manual changes and broker errors require reconciliation.
 - Graceful shutdown cancels all open orders on `SIGINT`/`SIGTERM`.
 - `.env`, logs and the SQLite database are gitignored; no credentials are committed.
+
+<br>
 
 ## Project layout
 
@@ -238,11 +257,15 @@ backtest/    no-lookahead engine, exit and sizing comparison harnesses
 dashboard/   FastAPI app + Jinja2 templates
 ```
 
+<br>
+
 ## Disclaimer
 
 The system is designed for live execution but is currently in a **paper-trading validation phase**. Going live is a deliberate configuration change, not a default — the Alpaca client refuses any non-paper endpoint as shipped.
 
 This is **not investment advice** and not a recommendation to buy or sell any security. Backtest results are historical simulations built on explicit modelling assumptions (slippage, next-open fills, intraday stop checks) and neither they nor paper results predict future performance. Trading equities involves risk of loss. If you deploy this against a funded account, you do so entirely at your own risk and responsibility.
+
+<br>
 
 ## License
 
