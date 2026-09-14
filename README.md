@@ -220,8 +220,9 @@ were fixed before data collection began. The most recent completed run failed
 
 - **Paper lock (current phase):** `AlpacaClient` raises on construction if `ALPACA_BASE_URL` is not the paper endpoint, and `verify_paper_account()` runs at startup. Removing this guard is a conscious one-line decision, which is exactly the point — live trading should never be reachable by a stray config value.
 - Drawdown breakers halt new entries for the day (−2%) and pause the bot entirely for the week (−5%).
-- Every position carries a broker-side GTC stop; a reconciliation pass each cycle guarantees exactly one full-size stop per position, so a partial fill or a manual change cannot leave shares unprotected.
-- Graceful shutdown cancels all open orders on `SIGINT`/`SIGTERM`.
+- Reconciliation verifies broker-side GTC stop quantity and status. Unconfirmed coverage blocks new entries and raises an alert. This is a point-in-time check, not a guarantee against gaps or broker outages.
+- Entry timeouts exclude protective orders. Graceful shutdown cancels standalone buy entries only and preserves exit orders on `SIGINT`/`SIGTERM`.
+- Stop replacements are checked at the broker before local updates. Failed replacements preserve existing protection instead of canceling it; ambiguous POST/PATCH failures are not blindly retried.
 - `.env`, logs and the SQLite database are gitignored; no credentials are committed.
 
 ## Project layout

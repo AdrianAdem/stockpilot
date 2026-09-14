@@ -340,13 +340,21 @@ class StockPilot:
         await self.stop_manager.handle_take_profit(positions)
         # Refresh positions (partial TP may have changed qty) then reconcile
         positions = await self.alpaca.get_positions()
-        await self.stop_manager.reconcile_stops(positions)
 
         # 3. Time stops
         await self.stop_manager.evaluate_time_stops(positions, self.claude)
 
         # 4. Sync orders
         await self.order_manager.sync_orders()
+
+        # Exit fills can change quantities. Check coverage after all order work,
+        # not before a task that could invalidate that coverage.
+        positions = await self.alpaca.get_positions()
+        if not await self.stop_manager.reconcile_stops(positions):
+            logger.error("entries_blocked_unverified_stop_coverage")
+            await self._maybe_heartbeat(equity, len(positions), "STOP-SCHUTZ NICHT BESTÄTIGT")
+            await asyncio.sleep(self.config.strategy.scan_interval_seconds)
+            return
 
         # 5. Can we trade?
         if not await self.portfolio_manager.can_trade(account, positions):
@@ -433,9 +441,12 @@ class StockPilot:
                 await self.telegram.send_trade(trade, sig)
                 trades_executed += 1
 
-                # Refresh positions after trade
-                positions = await self.alpaca.get_positions()
-                account = await self.alpaca.get_account()
+            # A failed response can hide a filled entry: inspect even on None.
+            positions = await self.alpaca.get_positions()
+            account = await self.alpaca.get_account()
+            if not await self.stop_manager.reconcile_stops(positions):
+                logger.error("entries_blocked_unverified_stop_coverage")
+                break
 
         if trades_executed:
             logger.info("trades_executed", count=trades_executed)
@@ -475,13 +486,15 @@ class StockPilot:
         logger.info("shutting_down")
         self.running = False
 
-        # Cancel all open orders on shutdown
+        # Broker-held protection must survive a stopped/offline process.
+        entries_cancelled = False
         try:
-            await self.order_manager.cancel_all()
+            entries_cancelled = await self.order_manager.cancel_entries()
         except Exception as e:
             logger.error("shutdown_cancel_error", error=str(e))
 
-        await self.telegram.send("🛑 <b>StockPilot stopped</b>\nAll open orders cancelled.")
+        status = "Entry cancellations confirmed" if entries_cancelled else "WARNING: entry cancellations NOT confirmed"
+        await self.telegram.send(f"🛑 <b>StockPilot stopped</b>\n{status}; protective orders preserved.")
 
         await self.alpaca.close()
         await self.sec.close()

@@ -1,3 +1,6 @@
+import asyncio
+import math
+import time
 from datetime import datetime
 
 import structlog
@@ -33,6 +36,44 @@ class StopLossManager:
         self.trailing_factor = trailing_factor
         self.initial_stop_factor = initial_stop_factor
         self.telegram = telegram
+        self._last_protection_alert: dict[str, float] = {}
+
+    @staticmethod
+    def _is_live_stop(order: dict, symbol: str) -> bool:
+        return (
+            order.get("symbol") == symbol
+            and order.get("side") == "sell"
+            and order.get("type") == "stop"
+            and order.get("time_in_force") == "gtc"
+            and order.get("status") in {"new", "accepted"}
+        )
+
+    async def _protection_alert(self, symbol: str) -> None:
+        logger.error("stop_protection_unverified", symbol=symbol)
+        now = time.monotonic()
+        if self.telegram and now - self._last_protection_alert.get(symbol, -3600) >= 3600:
+            await self.telegram.send(
+                f"⚠️ Stop-Schutz für {symbol} nicht bestätigt. "
+                "Neue Käufe blockiert, bis alle Positionen abgesichert sind."
+            )
+            self._last_protection_alert[symbol] = now
+
+    async def _verify_stop(self, order_id: str, symbol: str, qty: int, price: float) -> bool:
+        """An HTTP success only acknowledges submission, not active protection."""
+        for attempt in range(3):
+            order = await self.alpaca.get_order(order_id)
+            if order.get("status") in {"rejected", "canceled", "expired", "filled", "replaced"}:
+                return False
+            remaining = float(order.get("qty", 0)) - float(order.get("filled_qty", 0))
+            if (
+                self._is_live_stop(order, symbol)
+                and remaining == qty
+                and float(order.get("stop_price") or 0) >= price
+            ):
+                return True
+            if attempt < 2:
+                await asyncio.sleep(0.3)
+        return False
 
     async def _current_atr(self, symbol: str) -> float | None:
         """ATR(14) on daily bars — same period/timeframe as the backtest."""
@@ -47,7 +88,7 @@ class StopLossManager:
             logger.warning("atr_fetch_error", symbol=symbol, error=str(e))
             return None
 
-    async def reconcile_stops(self, positions: list[dict]):
+    async def reconcile_stops(self, positions: list[dict]) -> bool:
         """Ensure every open position has exactly ONE sell-stop covering its
         FULL current quantity. Fixes desync from multiple entries / partial fills
         where stop qty drifts below position qty, leaving shares unprotected."""
@@ -59,25 +100,35 @@ class StopLossManager:
                 stop_by_symbol[t.symbol] = max(stop_by_symbol.get(t.symbol, 0), t.stop_loss)
 
         try:
-            orders = await self.alpaca.get_orders()
+            orders = await self.alpaca.get_orders(status="open")
         except Exception as e:
             logger.error("reconcile_orders_fetch_error", error=str(e))
-            return
+            await self._protection_alert("PORTFOLIO")
+            return False
 
         # Count covered qty per symbol from existing sell-stops
         stop_qty: dict[str, int] = {}
         for o in orders:
-            if o.get("type") == "stop" and o.get("side") == "sell":
+            if self._is_live_stop(o, o.get("symbol", "")):
                 sym = o.get("symbol", "")
-                stop_qty[sym] = stop_qty.get(sym, 0) + int(o.get("qty", 0))
+                stop_qty[sym] = stop_qty.get(sym, 0) + float(o.get("qty", 0)) - float(o.get("filled_qty", 0))
 
+        verified = True
         for pos in positions:
             symbol = pos.get("symbol", "")
             pos_qty = int(pos.get("qty", 0))
             if pos_qty <= 0:
                 continue
             covered = stop_qty.get(symbol, 0)
+            pending = [o for o in orders if o.get("symbol") == symbol
+                       and o.get("side") == "sell" and o.get("type") == "stop"
+                       and o.get("status") in {"pending_new", "pending_replace", "pending_cancel", "partially_filled"}]
+            if pending:
+                verified = False
+                await self._protection_alert(symbol)
+                continue
             if covered == pos_qty:
+                self._last_protection_alert.pop(symbol, None)
                 continue  # already fully and exactly covered
 
             # Desync: rebuild a single stop for full qty
@@ -92,20 +143,22 @@ class StopLossManager:
                 stop_price = round(basis * 0.95, 2) if basis > 0 else None
             if not stop_price:
                 logger.error("cannot_price_stop", symbol=symbol, qty=pos_qty)
+                verified = False
+                await self._protection_alert(symbol)
                 continue
-            logger.warning(
-                "stop_desync_fixed",
-                symbol=symbol,
-                pos_qty=pos_qty,
-                covered_qty=covered,
-                stop_price=stop_price,
-            )
-            await self._replace_stop(symbol, pos_qty, stop_price)
+            if await self._replace_stop(symbol, pos_qty, stop_price):
+                logger.info("stop_desync_fixed", symbol=symbol, pos_qty=pos_qty,
+                            covered_qty=pos_qty, stop_price=stop_price)
+                self._last_protection_alert.pop(symbol, None)
+            else:
+                verified = False
+                await self._protection_alert(symbol)
+        return verified
 
     async def _place_fresh_stop(self, symbol: str, qty: int, stop_price: float) -> bool:
         """Submit a new GTC sell-stop. Returns True on success."""
         try:
-            await self.alpaca.submit_order(
+            order = await self.alpaca.submit_order(
                 symbol=symbol,
                 qty=qty,
                 side="sell",
@@ -113,7 +166,8 @@ class StopLossManager:
                 stop_price=round(stop_price, 2),
                 time_in_force="gtc",
             )
-            return True
+            order_id = order.get("id")
+            return bool(order_id) and await self._verify_stop(order_id, symbol, qty, stop_price)
         except Exception as e:
             logger.error(
                 "stop_submit_failed",
@@ -124,22 +178,19 @@ class StopLossManager:
             )
             return False
 
-    async def _replace_stop(self, symbol: str, qty: int, stop_price: float):
-        """Ensure exactly one sell-stop for symbol at stop_price/qty.
+    async def _replace_stop(self, symbol: str, qty: int, stop_price: float) -> bool:
+        """Replace without deleting existing protection; confirm the resulting order.
 
-        Prefers an atomic PATCH replace (no unprotected window), but Alpaca
-        rejects a replace whenever the order is no longer in a replaceable
-        state (422/403). In that case the old order is cancelled and a fresh
-        stop submitted — leaving the position unprotected is never acceptable,
-        so a failed replace must always fall through to cancel-and-recreate.
+        A failed or ambiguous PATCH is not permission to cancel a live stop.
+        Leave it intact and let reconciliation re-read broker state next cycle.
         """
-        if qty <= 0:
-            return
+        if qty <= 0 or not math.isfinite(stop_price) or stop_price <= 0:
+            return False
         try:
-            orders = await self.alpaca.get_orders()
+            orders = await self.alpaca.get_orders(status="open")
         except Exception as e:
             logger.error("stop_orders_fetch_error", symbol=symbol, error=str(e))
-            return
+            return False
 
         existing = [
             o
@@ -148,37 +199,26 @@ class StopLossManager:
         ]
 
         if not existing:
-            await self._place_fresh_stop(symbol, qty, stop_price)
-            return
+            return await self._place_fresh_stop(symbol, qty, stop_price)
 
-        # Try the atomic path first.
+        if len(existing) != 1:
+            logger.error("multiple_stops_require_reconciliation", symbol=symbol)
+            return False
+
+        # Never loosen a broker stop even when the local record is stale.
+        stop_price = max(round(stop_price, 2), float(existing[0].get("stop_price") or 0))
         try:
-            await self.alpaca.replace_order(
+            order = await self.alpaca.replace_order(
                 existing[0]["id"], stop_price=round(stop_price, 2), qty=qty
             )
-            replaced = True
+            order_id = order.get("id")
+            confirmed = bool(order_id) and await self._verify_stop(order_id, symbol, qty, stop_price)
+            if not confirmed:
+                logger.error("stop_replace_unconfirmed", symbol=symbol)
+            return confirmed
         except Exception as e:
-            logger.warning("stop_replace_rejected_falling_back", symbol=symbol, error=str(e)[:120])
-            replaced = False
-
-        if not replaced:
-            # Cancel every stale stop, then re-create. Verify the new order
-            # actually lands — a silent failure here means no protection.
-            for o in existing:
-                try:
-                    await self.alpaca.cancel_order(o["id"])
-                except Exception as e:
-                    logger.warning("stop_cancel_failed", symbol=symbol, error=str(e)[:120])
-            if not await self._place_fresh_stop(symbol, qty, stop_price):
-                logger.error("position_left_unprotected", symbol=symbol, qty=qty)
-            return
-
-        # Replace succeeded — clear any duplicate stops left over from a desync.
-        for extra in existing[1:]:
-            try:
-                await self.alpaca.cancel_order(extra["id"])
-            except Exception as e:
-                logger.warning("stop_cancel_failed", symbol=symbol, error=str(e)[:120])
+            logger.error("stop_replace_failed_protection_preserved", symbol=symbol, error=str(e))
+            return False
 
     async def update_trailing_stops(self, positions: list[dict]):
         """Continuous ATR trailing: once profitable, pull the stop up to
@@ -218,9 +258,9 @@ class StopLossManager:
                     atr=round(atr, 2),
                     factor=self.trailing_factor,
                 )
-                await self._replace_stop(symbol, qty, new_stop)
-                await self.db.update_stop_loss(symbol, new_stop)
-                trade.stop_loss = new_stop  # avoid re-triggering this run
+                if await self._replace_stop(symbol, qty, new_stop):
+                    await self.db.update_stop_loss(symbol, new_stop)
+                    trade.stop_loss = new_stop
 
     async def migrate_stops_to_atr(self, positions: list[dict]):
         """One-time on startup with the new exit logic: raise each open
@@ -249,9 +289,9 @@ class StopLossManager:
                 else cur_stop
             )
             if new_stop > cur_stop:
-                await self._replace_stop(symbol, qty, new_stop)
-                await self.db.update_stop_loss(symbol, new_stop)
-                logger.info("stop_migrated", symbol=symbol, old_stop=cur_stop, new_stop=new_stop)
+                if await self._replace_stop(symbol, qty, new_stop):
+                    await self.db.update_stop_loss(symbol, new_stop)
+                    logger.info("stop_migrated", symbol=symbol, old_stop=cur_stop, new_stop=new_stop)
             else:
                 logger.info("stop_kept", symbol=symbol, stop=cur_stop, would_be=new_stop)
 

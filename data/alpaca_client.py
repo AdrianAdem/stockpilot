@@ -55,15 +55,17 @@ class AlpacaClient:
             except httpx.HTTPStatusError as e:
                 logger.error("alpaca_http_error", status=e.response.status_code,
                              url=url, attempt=attempt + 1)
-                if attempt == MAX_RETRIES - 1:
+                if method in {"POST", "PATCH"} or attempt == MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(2 ** attempt)
             except httpx.RequestError as e:
                 logger.error("alpaca_request_error", error=str(e), attempt=attempt + 1)
-                if attempt == MAX_RETRIES - 1:
+                # A lost response may hide a successful order. Reconcile before
+                # another mutation instead of risking duplicate protection.
+                if method in {"POST", "PATCH"} or attempt == MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(2 ** attempt)
-        return {}
+        raise RuntimeError("Alpaca request exhausted retries without a response")
 
     async def get_account(self) -> dict:
         return await self._request("GET", f"{self.base_url}/v2/account")
@@ -199,9 +201,15 @@ class AlpacaClient:
         return await self._request("POST", f"{self.base_url}/v2/orders", json=body)
 
     async def get_orders(self, status: str = "open") -> list[dict]:
-        return await self._request(
-            "GET", f"{self.base_url}/v2/orders", params={"status": status}
+        result = await self._request(
+            "GET", f"{self.base_url}/v2/orders", params={"status": status, "limit": 500}
         )
+        if not isinstance(result, list) or len(result) >= 500:
+            raise RuntimeError("Cannot verify a complete Alpaca order list")
+        return result
+
+    async def get_order(self, order_id: str) -> dict:
+        return await self._request("GET", f"{self.base_url}/v2/orders/{order_id}")
 
     async def cancel_order(self, order_id: str) -> None:
         await self._request("DELETE", f"{self.base_url}/v2/orders/{order_id}")
