@@ -25,7 +25,15 @@ ran before that cancellation, leaving positions unprotected until a later scan.
 ## Scope and remaining work
 
 Entry strategies, score threshold, universe and position sizing were not changed.
-Stale ATR pagination, fill-ledger reconciliation, contradictory Claude signals,
-and backtest time/fill/accounting defects remain separate tasks. Previously
+Fill-ledger reconciliation, contradictory Claude signals, and backtest
+time/fill/accounting defects remain separate tasks. Previously
 reported backtest metrics should not be treated as validated evidence until those
 defects are corrected. The forward-test schedule was not reset by this repair.
+
+## ATR data correction — 2026-09-16
+
+The stop manager previously requested the first 30 bars from a wider ascending
+date range. On 2026-09-16, QCOM's input therefore ended on 2026-08-31. It now
+requests newest-first bars, excludes the current New York session, and restores
+chronological order before ATR(14). Live read-only verification returned 30 bars
+through the completed 2026-09-15 session. Entry rules remain unchanged.

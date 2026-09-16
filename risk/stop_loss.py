@@ -78,7 +78,7 @@ class StopLossManager:
     async def _current_atr(self, symbol: str) -> float | None:
         """ATR(14) on daily bars — same period/timeframe as the backtest."""
         try:
-            bars = await self.alpaca.get_bars(symbol, "1Day", limit=30)
+            bars = await self.alpaca.get_completed_daily_bars(symbol, limit=30)
             if bars.empty or len(bars) < 15:
                 return None
             atr = _atr(bars["high"], bars["low"], bars["close"], 14)

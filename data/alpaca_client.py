@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -102,6 +103,33 @@ class AlpacaClient:
             "GET", f"{self.data_url}/v2/stocks/{symbol}/bars", params=params
         )
         return self._bars_to_df(data.get("bars", []))
+
+    async def get_completed_daily_bars(
+        self, symbol: str, limit: int = 30, as_of: datetime | None = None
+    ) -> pd.DataFrame:
+        """Return latest completed New York daily bars, oldest first."""
+        now = as_of or datetime.now(ZoneInfo("America/New_York"))
+        if now.tzinfo is None:
+            raise ValueError("as_of must be timezone-aware")
+        cutoff = now.astimezone(ZoneInfo("America/New_York")).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        data = await self._request(
+            "GET",
+            f"{self.data_url}/v2/stocks/{symbol}/bars",
+            params={
+                "timeframe": "1Day",
+                "limit": limit,
+                "feed": "iex",
+                "sort": "desc",
+                "start": (cutoff - timedelta(days=int(limit * 1.5) + 10)).isoformat(),
+                "end": (cutoff - timedelta(seconds=1)).isoformat(),
+            },
+        )
+        bars = self._bars_to_df(data.get("bars", []))
+        if bars.empty:
+            return bars
+        return bars.loc[bars.index < cutoff].tail(limit)
 
     def _bars_to_df(self, bars: list[dict]) -> pd.DataFrame:
         if not bars:
