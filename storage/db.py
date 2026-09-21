@@ -4,7 +4,7 @@ from pathlib import Path
 import aiosqlite
 import structlog
 
-from storage.models import DailySummary, TradeRecord, WhaleHolding
+from storage.models import DailySummary, Signal, TradeRecord, WhaleHolding
 
 logger = structlog.get_logger()
 
@@ -44,6 +44,10 @@ class Database:
 
     async def _create_tables(self):
         await self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS pending_orders (
+                order_id TEXT PRIMARY KEY,
+                signal_json TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -127,11 +131,37 @@ class Database:
         )
         await self._db.commit()
 
+    async def save_pending_order(self, order_id: str, signal: Signal):
+        """Keep uncertain order intent across process restarts."""
+        await self._db.execute(
+            "INSERT OR REPLACE INTO pending_orders(order_id, signal_json) VALUES (?, ?)",
+            (order_id, signal.model_dump_json()),
+        )
+        await self._db.commit()
+
+    async def get_pending_orders(self) -> list[tuple[str, Signal]]:
+        rows = await (
+            await self._db.execute("SELECT order_id, signal_json FROM pending_orders")
+        ).fetchall()
+        return [(row[0], Signal.model_validate_json(row[1])) for row in rows]
+
+    async def delete_pending_order(self, order_id: str):
+        await self._db.execute("DELETE FROM pending_orders WHERE order_id=?", (order_id,))
+        await self._db.commit()
+
     async def close_trade(self, order_id: str, close_price: float, pnl: float):
         await self._db.execute(
             """UPDATE trades SET closed_at=?, close_price=?, pnl=?
             WHERE order_id=?""",
             (datetime.utcnow().isoformat(), close_price, pnl, order_id),
+        )
+        await self._db.commit()
+
+    async def update_entry_fill(self, order_id: str, qty: int, price: float, timestamp: datetime):
+        """Correct legacy quote-based entries from their exact broker order."""
+        await self._db.execute(
+            "UPDATE trades SET qty=?, price=?, timestamp=? WHERE order_id=? AND closed_at IS NULL",
+            (qty, price, timestamp.isoformat(), order_id),
         )
         await self._db.commit()
 

@@ -229,12 +229,26 @@ class AlpacaClient:
         return await self._request("POST", f"{self.base_url}/v2/orders", json=body)
 
     async def get_orders(self, status: str = "open") -> list[dict]:
-        result = await self._request(
-            "GET", f"{self.base_url}/v2/orders", params={"status": status, "limit": 500}
-        )
-        if not isinstance(result, list) or len(result) >= 500:
-            raise RuntimeError("Cannot verify a complete Alpaca order list")
-        return result
+        """Page by order ID so equal submission times cannot skip fills."""
+        params = {"status": status, "limit": 500, "direction": "desc"}
+        orders = []
+        seen = set()
+        for _ in range(100):
+            page = await self._request(
+                "GET", f"{self.base_url}/v2/orders", params=dict(params)
+            )
+            if not isinstance(page, list):
+                raise RuntimeError("Invalid Alpaca order list")
+            for order in page:
+                order_id = order.get("id")
+                if not order_id or order_id in seen:
+                    raise RuntimeError("Alpaca order pagination did not advance")
+                seen.add(order_id)
+                orders.append(order)
+            if len(page) < 500:
+                return orders
+            params["before_order_id"] = page[-1]["id"]
+        raise RuntimeError("Alpaca order history exceeded pagination safety bound")
 
     async def get_order(self, order_id: str) -> dict:
         return await self._request("GET", f"{self.base_url}/v2/orders/{order_id}")

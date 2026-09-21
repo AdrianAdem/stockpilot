@@ -108,8 +108,7 @@ class SignalCombiner:
                             strategy_action=best_signal.action.value,
                             claude_action=claude_signal.action.value,
                         )
-                        if claude_signal.action == Action.SKIP:
-                            continue
+                        continue
 
                     claude_contrib = claude_signal.score * self.weight_claude
                     strategy_contrib = strategy_score * (1 - self.weight_claude)
