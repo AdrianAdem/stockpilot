@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -147,5 +148,10 @@ async def start_dashboard(database: Database, host: str = "0.0.0.0", port: int =
     global db
     db = database
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
+    class EmbeddedServer(uvicorn.Server):
+        def capture_signals(self):
+            # StockPilot owns process shutdown and must finish broker cleanup.
+            return nullcontext()
+
+    server = EmbeddedServer(config)
     await server.serve()

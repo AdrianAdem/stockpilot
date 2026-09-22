@@ -25,3 +25,13 @@ def test_history_rejects_repeated_page_instead_of_duplicate_fills():
     client._request = AsyncMock(return_value=page)
     with pytest.raises(RuntimeError, match="did not advance"):
         asyncio.run(client.get_orders("closed"))
+
+
+def test_history_deduplicates_overlapping_pages():
+    client = object.__new__(AlpacaClient)
+    client.base_url = "https://paper-api.alpaca.markets"
+    page = [{"id": str(i)} for i in range(500)]
+    client._request = AsyncMock(side_effect=[page, [{"id": "499"}, {"id": "new"}]])
+    result = asyncio.run(client.get_orders("closed"))
+    assert len(result) == 501
+    assert len({o["id"] for o in result}) == 501

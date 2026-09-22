@@ -239,12 +239,18 @@ class AlpacaClient:
             )
             if not isinstance(page, list):
                 raise RuntimeError("Invalid Alpaca order list")
+            new_count = 0
             for order in page:
                 order_id = order.get("id")
-                if not order_id or order_id in seen:
-                    raise RuntimeError("Alpaca order pagination did not advance")
+                if not order_id:
+                    raise RuntimeError("Alpaca returned an order without an id")
+                if order_id in seen:
+                    continue
                 seen.add(order_id)
                 orders.append(order)
+                new_count += 1
+            if page and not new_count:
+                raise RuntimeError("Alpaca order pagination did not advance")
             if len(page) < 500:
                 return orders
             params["before_order_id"] = page[-1]["id"]
