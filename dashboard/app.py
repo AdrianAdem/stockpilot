@@ -148,6 +148,7 @@ async def start_dashboard(database: Database, host: str = "0.0.0.0", port: int =
     global db
     db = database
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+
     class EmbeddedServer(uvicorn.Server):
         def capture_signals(self):
             # StockPilot owns process shutdown and must finish broker cleanup.

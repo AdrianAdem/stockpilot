@@ -13,16 +13,26 @@ from risk.stop_loss import StopLossManager
 
 def order(**overrides):
     result = {
-        "id": "stop-1", "symbol": "AAPL", "side": "sell", "type": "stop",
-        "status": "new", "time_in_force": "gtc", "stop_price": "95.00",
-        "qty": "10", "filled_qty": "0", "order_class": "simple", "legs": None,
+        "id": "stop-1",
+        "symbol": "AAPL",
+        "side": "sell",
+        "type": "stop",
+        "status": "new",
+        "time_in_force": "gtc",
+        "stop_price": "95.00",
+        "qty": "10",
+        "filled_qty": "0",
+        "order_class": "simple",
+        "legs": None,
         "created_at": "2026-09-14T09:00:00Z",
     }
     return result | overrides
 
 
 POSITION = {
-    "symbol": "AAPL", "qty": "10", "avg_entry_price": "100.00",
+    "symbol": "AAPL",
+    "qty": "10",
+    "avg_entry_price": "100.00",
     "current_price": "110.00",
 }
 
@@ -34,11 +44,13 @@ def setup():
         get_order=AsyncMock(return_value=order()),
         submit_order=AsyncMock(return_value=order()),
         replace_order=AsyncMock(return_value=order(id="replacement-1")),
-        cancel_order=AsyncMock(), cancel_all_orders=AsyncMock(),
+        cancel_order=AsyncMock(),
+        cancel_all_orders=AsyncMock(),
     )
     trade = SimpleNamespace(symbol="AAPL", price=100.0, stop_loss=95.0)
     db = SimpleNamespace(
-        get_open_trades=AsyncMock(return_value=[trade]), update_stop_loss=AsyncMock(),
+        get_open_trades=AsyncMock(return_value=[trade]),
+        update_stop_loss=AsyncMock(),
     )
     return StopLossManager(broker, db), broker, db, trade
 
@@ -51,19 +63,31 @@ def test_fresh_stop_succeeds_only_after_get_confirms_remaining_quantity(setup):
         assert asyncio.run(manager._place_fresh_stop("AAPL", 10, 95.0)) is True
         broker.get_order.assert_awaited_once_with("stop-1")
     broker.submit_order.assert_awaited_with(
-        symbol="AAPL", qty=10, side="sell", order_type="stop",
-        stop_price=95.0, time_in_force="gtc",
+        symbol="AAPL",
+        qty=10,
+        side="sell",
+        order_type="stop",
+        stop_price=95.0,
+        time_in_force="gtc",
     )
 
 
 def test_fresh_stop_rejects_each_invalid_confirmation_field(setup):
     manager, broker, _, _ = setup
     invalid = [
-        {"status": "pending_new"}, {"status": "rejected"}, {"status": "canceled"},
-        {"status": "filled"}, {"status": "partially_filled"},
-        {"symbol": "MSFT"}, {"side": "buy"},
-        {"type": "limit"}, {"time_in_force": "day"}, {"stop_price": "94.99"},
-        {"qty": "9"}, {"qty": "11"}, {"filled_qty": "1"},
+        {"status": "pending_new"},
+        {"status": "rejected"},
+        {"status": "canceled"},
+        {"status": "filled"},
+        {"status": "partially_filled"},
+        {"symbol": "MSFT"},
+        {"side": "buy"},
+        {"type": "limit"},
+        {"time_in_force": "day"},
+        {"stop_price": "94.99"},
+        {"qty": "9"},
+        {"qty": "11"},
+        {"filled_qty": "1"},
     ]
     results = []
     for fields in invalid:
@@ -161,10 +185,13 @@ def mixed_orders():
     return [
         order(id="entry-market", side="buy", type="market"),
         order(id="entry-limit", side="buy", type="limit", filled_qty="2"),
-        order(id="protective-stop"), order(id="sell-limit", type="limit"),
+        order(id="protective-stop"),
+        order(id="sell-limit", type="limit"),
         order(id="buy-stop", side="buy"),
-        *[order(id=kind, side="buy", type="limit", order_class=kind)
-          for kind in ("bracket", "oco", "oto")],
+        *[
+            order(id=kind, side="buy", type="limit", order_class=kind)
+            for kind in ("bracket", "oco", "oto")
+        ],
         order(id="with-legs", side="buy", type="limit", legs=[order(id="leg")]),
     ]
 
@@ -178,7 +205,8 @@ def test_sync_cancels_only_expired_simple_buys_without_legs(setup):
     ]
     manager._order_timestamps = {
         item["id"]: datetime.utcnow() - timedelta(minutes=6)
-        for item in broker.get_orders.return_value if item["id"] != "recent"
+        for item in broker.get_orders.return_value
+        if item["id"] != "recent"
     }
     asyncio.run(manager.sync_orders())
     assert broker.cancel_order.await_args_list == [call("entry-market"), call("entry-limit")]
@@ -205,8 +233,10 @@ def test_pending_duplicate_stop_blocks_entries(setup):
 
 def test_shutdown_continues_after_cancel_failure_and_reports_unconfirmed(setup):
     _, broker, db, _ = setup
-    entries = [order(id="one", side="buy", type="market"),
-               order(id="two", side="buy", type="limit")]
+    entries = [
+        order(id="one", side="buy", type="market"),
+        order(id="two", side="buy", type="limit"),
+    ]
     broker.get_orders.side_effect = [entries, [entries[0]]]
     broker.cancel_order.side_effect = [RuntimeError("failed"), None]
     assert asyncio.run(OrderManager(broker, db).cancel_entries()) is False
