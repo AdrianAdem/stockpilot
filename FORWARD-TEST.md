@@ -7,9 +7,9 @@ afterwards.
 
 ## Current run
 **Run 5: 2026-10-19 → 2026-11-30** (6 weeks).
-First run in which the live signal path matches the backtested one (completed
-daily bars, undiscounted threshold, stop anchored to the fill) and new entries
-are gated by market regime.
+First run in which the live bot trades the model the backtest actually tested:
+completed daily bars, one entry attempt per signal near the open, the plain
+strategy score against the 0.65 threshold, and a `fill − 2×ATR` initial stop.
 
 ---
 
@@ -39,9 +39,16 @@ same six weeks, lost **−5.8% at Sharpe −8.2** — worse than live. SPY was f
 in a sideways market, while in the preceding trending window (SPY +3.3%) the
 same backtest made +2.6% at Sharpe 1.8.
 
-Three live-vs-backtest deviations were found along the way and fixed for run 5
+Four live-vs-backtest deviations were found along the way and fixed for run 5
 (see changelog). They did not cause run 4's loss — the backtest lost more —
 but they meant live was trading a model the backtest never validated.
+
+The same investigation found defects in the backtest harnesses themselves
+(docs/BACKTESTS.md, section 5). Re-run cleanly, the strategy's backtested
+Sharpe is about **0.3** over 440 days, and the fill-order noise alone spans
+−0.5 to 1.0. **Criterion 1 (Sharpe > 0.8) is not met even in backtest.**
+Run 5 therefore mainly tests whether live now reproduces the backtest, not
+whether the strategy is profitable.
 
 Stop coverage failed on a bug in the protective-stop lifecycle, fixed on
 22 Sep; since then no position has been without a stop. Uptime failed because
@@ -84,20 +91,19 @@ under its intended conditions.
 
 ## Changelog
 
-- **2026-10-18 — live signal path aligned with the backtest, regime gate added.
-  Test restarted.**
-  (a) Signals are computed on completed daily bars; previously they used the
-  still-forming bar, so intraday noise could trigger entries.
-  (b) The 0.9 haircut on signals without Claude confirmation is removed. It
-  silently raised the live entry threshold from the backtested 0.65 to ~0.72.
-  (c) The initial stop keeps its 2×ATR distance but is measured from the fill.
-  (d) New entries only while SPY's last close is above its 50-day SMA. Backtest
-  over 440 days: Sharpe 0.49 → 0.76, profit factor 1.20 → 1.35, 225 → 195
-  trades. It does **not** rescue the run-4 window (−6.4% → −6.1%): SPY sat above
-  its SMA50 on 26 of those 30 days. Sideways chop above the averages remains an
-  unsolved weakness, documented rather than tuned away.
+- **2026-10-18 — live signal path aligned with the backtest. Test restarted.**
+  (a) Signals use completed daily bars instead of the still-forming bar.
+  (b) One entry attempt per symbol per session, within 60 minutes of the open
+  (`ENTRY_WINDOW_MINUTES`). Previously an unchanged signal could re-buy a name
+  hours after its stop fired.
+  (c) Claude is a veto only. The ×0.9 haircut on unconfirmed signals (which
+  raised the effective threshold to ~0.72) and the confidence blend are gone.
+  (d) Initial stop `fill − 2×ATR` for every strategy; mean reversion, whale and
+  Claude previously set their own distances.
   (e) Claude decisions are cached per symbol per day, and calls pause for six
   hours after a billing error (2,333 failed calls during run 4).
+  A market-regime gate (SPY > SMA50) was implemented, then **removed before
+  going live**: the harness re-run showed it failing its own decision rule.
 - **2026-09-22 — protective-stop lifecycle fixed** (pending orders, broker fill
   accounting, completed daily bars for ATR). Not a restart; mid-run fix.
 - **2026-08-23 — stop-coverage bug fixed, risk-based sizing added. Test restarted.**
@@ -127,15 +133,15 @@ under its intended conditions.
 
 ## Honest expectation
 
-- The regime-gated backtest returns 7.5% over 440 days ≈ **+1.0% over six weeks**.
-  Live will likely be lower.
-- **If the market chops sideways above its averages again, run 5 will lose** —
-  the gate does not cover that case. A losing run in a flat market says the
-  known weakness is still there, not that the fixes failed. Compare against SPY.
-- With the gate active, weeks without a single new entry are expected
-  behaviour, not an outage. Telegram reports every regime switch.
-- A win rate near 40% is normal for trend following, provided the average win
-  exceeds the average loss.
+- The corrected backtest makes about +2.7% over 440 days at Sharpe 0.3 —
+  roughly **+0.4% over six weeks**, inside the noise. A flat or slightly
+  negative run 5 is the expected outcome, not a malfunction.
+- The useful question for run 5: does live P&L now track the backtest over the
+  same weeks? Compare both at the end. A large gap means a remaining
+  implementation difference; a small gap with a poor result means the
+  strategy needs new ideas, not more tuning.
+- Entries happen only in the first hour after the open. On days the machine is
+  asleep at the open, the bot will not buy — exits and stops are unaffected.
 
 ## Abort conditions (stop and analyse immediately)
 

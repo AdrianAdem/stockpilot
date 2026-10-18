@@ -12,6 +12,13 @@ intraday low, max 15 concurrent positions, 80% invested cap.
 Each experiment freezes everything except the variable under test. Where the
 trade count is identical across rows, the entry set was provably unchanged.
 
+> **Correction, 2026-10-18.** An audit found two defects in the harnesses that
+> sections 1–3 were originally run on: signals lagged one session (the date
+> filter compared New-York-stamped bars against UTC midnight), and same-day
+> candidates filled in arbitrary API-response order. Both are fixed. Sections
+> 1–3 keep their original tables as the record of how each decision was made;
+> section 5 re-runs them and states whether each conclusion still holds.
+
 ---
 
 ## 1. Exit model
@@ -93,7 +100,9 @@ mark") lock in those gains?
 | **+ portfolio stop 2%** | **−2.5%** | **−0.49** | −3.6% | 0.55 | **53** |
 
 **Decision: rejected.** The stop fires early and takes the winners out with the
-losers; 227 trades collapse to 53. Drawdown improves, but only because the
+losers; 227 trades collapse to 53. *(Re-run, section 5: it fires within the first
+weeks and the model never re-enters, leaving 23 trades — any Sharpe it shows
+is the Sharpe of not trading.)* Drawdown improves, but only because the
 strategy stops working.
 
 *Caveat:* this implementation never re-enters after the stop fires, which is
@@ -106,60 +115,97 @@ every earlier level that looked identical at the time.
 
 ---
 
-## 4. Market-regime gate
+## 4. Market-regime gate — rejected
 
-**Question:** forward-test run 4 lost 3.0%. Was that the live implementation,
-or the strategy?
+**Question:** forward-test run 4 (24 Aug – 5 Oct) lost 3.0%. Was that the live
+implementation or the strategy?
 
-**Out-of-sample check first.** The unchanged backtest over the same six weeks:
-
-| Window | Backtest | SPY |
-|---|---|---|
-| Before run 3 (in-sample) | +4.7%, Sharpe 0.78 | — |
-| Run 3 (29 Jun – 21 Aug) | +2.6%, Sharpe 1.82 | +3.3% |
-| **Run 4 (24 Aug – 5 Oct)** | **−5.8%, Sharpe −8.19** | **+0.1%** |
-
-The backtest lost *more* than live. The strategy, not the plumbing, failed:
-long-only momentum gets whipsawed when the market goes sideways.
+**Out-of-sample check.** The backtest over those six weeks lost more than live
+did, in every variant (−5% to −8%), while SPY was flat. The strategy, not the
+plumbing, lost money there: long-only momentum is whipsawed in a sideways market.
 
 **Tested:** gate new entries on a textbook regime filter, standard parameters
 only. Decision rule fixed before running: adopt only if Sharpe improves both
-over the full period *and* in-sample, keeping ≥ 60% of trades. The run-4
-window is reported but cannot decide, because it prompted the test.
+over the full period *and* in-sample, keeping ≥ 60% of trades. Added once the
+fill-order problem (section 5) surfaced — a stricter rule, not a looser one:
+the filter must also beat the baseline in ≥ 80% of 30 random same-day fill
+orders, each paired with the baseline under the identical order.
 
-| Gate | Sharpe | In-sample Sharpe | MaxDD | PF | #Tr | Run-4 window |
-|---|---|---|---|---|---|---|
-| None (baseline) | 0.49 | 1.12 | −7.0% | 1.20 | 225 | −6.4% |
-| SPY > SMA200 | 0.69 | 1.38 | −7.0% | 1.29 | 219 | −6.3% |
-| **SPY > SMA50** | **0.76** | **1.70** | −6.7% | **1.35** | 195 | −6.1% |
-| Breadth ≥ 50% above SMA50 | 0.67 | 1.32 | **−4.6%** | 1.34 | 172 | −4.2% |
+| Gate | Sharpe (score order) | In-sample | PF | #Tr | Beats baseline, paired |
+|---|---|---|---|---|---|
+| None (baseline) | 0.29 | 1.31 | 1.10 | 228 | — |
+| SPY > SMA200 | 0.00 | 0.93 | 0.99 | 228 | 7 / 30 |
+| SPY > SMA50 | −0.01 | 1.27 | 0.99 | 212 | 9 / 30 |
+| Breadth ≥ 50% above SMA50 | 0.55 | 1.19 | 1.25 | 167 | 23 / 30 |
 
-**Decision: SPY > SMA50.** All three passed the rule; SMA50 had the best
-Sharpe and profit factor at the same simplicity as SMA200.
+**Decision: no gate.** None passes. Breadth comes closest but loses in-sample
+and misses the 80% bar.
 
-**What it does not fix:** run 4. SPY closed above its SMA50 on 26 of those 30
-days — the market chopped sideways *above* its averages, which no trend gate
-detects. That weakness is documented here rather than tuned away; fitting a
-fourth filter to the one window that motivated the search would be
-curve-fitting by construction.
-
-*Note on baselines:* the absolute numbers differ from section 2 because this
-run includes six more weeks of data — including run 4's losses.
+*How close this came to shipping:* on the defective harness, SPY > SMA50 looked
+like a clear win (Sharpe 0.49 → 0.76, PF 1.20 → 1.35) and was implemented. The
+audit and re-run reversed it before it went live.
 
 Harness: [`backtest/regime_compare.py`](../backtest/regime_compare.py)
 
-### Live-vs-backtest deviations found on the way
+---
 
-None of these caused run 4's loss (the backtest lost more), but each meant the
-live bot traded a model that had never been tested:
+## 5. Method corrections and what they revealed
 
-- Signals were computed on the **still-forming** daily bar; the backtest uses
-  the completed bar and fills at the next open.
-- Signals without Claude confirmation were scored **×0.9**, silently lifting
-  the effective entry threshold from 0.65 to ~0.72 — a level that tested worse.
-- The initial stop was measured from the **signal-time price**, not the fill.
+**One-session signal lag.** Alpaca stamps daily bars at New York midnight
+(04:00 or 05:00 UTC). The harnesses selected history with
+`index <= Timestamp(date, tz="UTC")`, which excluded day *d*'s own bar — so a
+"signal on *d*, fill at *d+1*'s open" was really a signal on *d−1*. No
+lookahead, but not the model the live bot runs. Fixed to compare against New
+York midnight.
 
-All three were aligned with the backtest on 2026-10-18.
+**Gap-down stop fills.** A stop gapped through at the open was filled at the
+stop price. It now fills at the open. This turned the worst single trades from
+roughly −$500 into −$1,100 to −$2,700 for flat sizing.
+
+**Fill order.** With 15 slots and an 80% invested cap, *which* same-day
+candidates get filled matters. The order was whatever the data API returned,
+which varies between requests. Same model, same data, same 2,400 candidates:
+
+| Fill order | Sharpe |
+|---|---|
+| API order, request A | 0.24 |
+| API order, request B | 0.50 |
+| 30 random orders | median 0.50, range **−0.48 to 1.04** |
+| By score, highest first (what live does) | 0.29 |
+
+Two conclusions follow. First, every capital-constrained comparison needs a
+fixed order; candidates are now sorted by score, as live trades them. Second,
+and more important: **the strategy's measured edge is not distinguishable
+from the noise of which trades happen to fill.** Taking the highest-scored
+setups first does *worse* than the random median, so the score does not rank
+trade quality.
+
+**Re-run of the earlier decisions** (score order, lag and gap fills fixed):
+
+| Decision | Original | Re-run | Holds? |
+|---|---|---|---|
+| Exit: ATR trailing N=2.5 | Sharpe 1.38 vs 0.65 (2-stage) | 1.36 vs 0.57; N=1.5 now 1.45 | Yes — gap 0.09 is inside the 0.1 tiebreak |
+| Sizing: risk 0.25% per trade | Sharpe 0.72 = 0.72, worst −$267 vs −$506 | **0.29 vs 0.13**, worst −$491 vs −$1,119, MaxDD −8.7% vs −11.4% | Yes, more clearly |
+| Regime gate | SPY > SMA50 adopted | rejected | **No** |
+
+The exit comparison uses fixed notional per trade, so fill order does not
+affect it; its Sharpe values are not comparable to the capital-constrained ones.
+
+### Live-vs-backtest deviations fixed on 2026-10-18
+
+None of these caused run 4's loss — the backtest lost more — but each meant
+the live bot traded a model that was never tested:
+
+- Signals used the **still-forming** daily bar. Now completed bars only.
+- An unchanged completed-bar signal could **re-buy a name hours after it was
+  stopped out**, and enter at any time of day. The backtest fills each signal
+  once, at the open. Live now allows one attempt per symbol per session, in the
+  first 60 minutes.
+- Unconfirmed signals were scored **×0.9**, silently lifting the threshold from
+  0.65 to ~0.72; confirmed ones blended in Claude's confidence, so a lukewarm
+  "yes" could sink a setup a "no" would have passed. Claude is now a veto only.
+- Initial stops were 2×, 2.5× or 3× ATR depending on strategy, or Claude's own
+  number. Now `fill − 2×ATR` for every entry, as tested.
 
 ---
 
@@ -173,4 +219,5 @@ Current status and the pre-registered pass/fail criteria live in
 collection started and have not been changed since.
 
 The two most recent completed runs failed 3 and 4 of 6 criteria. Both are
-documented there, with diagnoses, rather than quietly dropped.
+documented there, with diagnoses, rather than quietly dropped. Given section 5,
+the Sharpe > 0.8 criterion is not met even in backtest.
