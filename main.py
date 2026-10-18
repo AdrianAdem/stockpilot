@@ -65,6 +65,7 @@ class StockPilot:
         # Initialize components
         self.db = Database()
         await self.db.connect()
+        await self._seed_entry_attempts()
 
         self.alpaca = AlpacaClient(self.config.alpaca)
         account = await self.alpaca.verify_paper_account()
@@ -572,8 +573,10 @@ class StockPilot:
                     continue
                 self._entry_attempts[sig.symbol] = session_day
                 stop = self._initial_stop(tech_data.get(sig.symbol, {}))
-                if stop:
-                    sig = sig.model_copy(update={"stop_loss_price": stop})
+                if not stop:
+                    logger.warning("order_blocked", symbol=sig.symbol, reason="no_atr_stop")
+                    continue
+                sig = sig.model_copy(update={"stop_loss_price": stop})
 
             current_price = tech_data.get(sig.symbol, {}).get("price")
             if sig.action.value == "SELL":
@@ -647,6 +650,24 @@ class StockPilot:
 
         # 14. Wait for next scan
         await asyncio.sleep(self.config.strategy.scan_interval_seconds)
+
+    async def _seed_entry_attempts(self) -> None:
+        """Rebuild today's entry attempts from recorded fills after a restart.
+
+        Kept only in memory, a restart between a stop-out and the next scan
+        would let the unchanged signal buy the same name again.
+        """
+        now_ny = datetime.now(ZoneInfo("America/New_York"))
+        midnight = now_ny.replace(hour=0, minute=0, second=0, microsecond=0)
+        day = now_ny.date().isoformat()
+        for trade in await self.db.get_recent_trades(days=1):
+            ts = trade.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)  # legacy rows were stored as naive UTC
+            if trade.side.value == "BUY" and ts >= midnight:
+                self._entry_attempts[trade.symbol] = day
+        if self._entry_attempts:
+            logger.info("entry_attempts_restored", symbols=sorted(self._entry_attempts))
 
     def _initial_stop(self, td: dict) -> float | None:
         """One initial stop rule for every strategy, as in the backtest.

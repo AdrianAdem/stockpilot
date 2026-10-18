@@ -63,7 +63,7 @@ class Trader:
         today's price. Re-anchoring reproduces the backtested entry - 2*ATR,
         and after a gap down it avoids a sell stop above the market, which
         the broker rejects. Returns None rather than a stop at or above the
-        fill; reconciliation then places an ATR stop for the position.
+        fill; reconcile_stops then places its fallback stop below the entry.
         """
         if signal_stop and reference_price and 0 < signal_stop < reference_price:
             anchored = round(fill_price - (reference_price - signal_stop), 2)
@@ -132,6 +132,19 @@ class Trader:
                 if qty > 0 or order.get("status") == "filled":
                     trade = self._trade_from_fill(order_id, signal, order)
                     if signal.action.value == "BUY":
+                        if trade.stop_loss and trade.stop_loss >= trade.price:
+                            # The signal-time stop sits at or above this fill
+                            # (gap down). Recorded as-is, reconcile_stops would
+                            # submit a sell stop above the market, which the
+                            # broker rejects on every scan. Without a recorded
+                            # stop it places its fallback below the entry.
+                            logger.warning(
+                                "recovered_fill_stop_dropped",
+                                symbol=trade.symbol,
+                                stop=trade.stop_loss,
+                                fill=trade.price,
+                            )
+                            trade = trade.model_copy(update={"stop_loss": None})
                         await self.db.log_trade(trade)
                 await self._forget_pending(order_id)
             except Exception as exc:
@@ -280,8 +293,9 @@ class Trader:
                 logger.warning("order_blocked", symbol=signal.symbol, reason="missing_stop")
                 return None
             if current_price and signal.stop_loss_price >= current_price:
-                # A sell stop at or above the market is rejected by the broker
-                # after the entry has already filled, leaving it unprotected.
+                # Guard for callers passing a stop that is not below their
+                # reference price. (Main-loop stops derive from that same close,
+                # so this never fires there; gaps are handled by _anchor_stop.)
                 logger.warning(
                     "order_blocked",
                     symbol=signal.symbol,
@@ -357,7 +371,7 @@ class Trader:
                     )
                 else:
                     # The main loop reconciles stops right after this returns,
-                    # which places an ATR stop for the uncovered position.
+                    # which places a fallback stop below the entry.
                     logger.error(
                         "no_stop_loss_for_buy",
                         symbol=signal.symbol,
