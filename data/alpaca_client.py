@@ -143,12 +143,28 @@ class AlpacaClient:
         return df.set_index("timestamp").sort_index()
 
     async def get_bars_multi(self, symbols: list[str], timeframe: str = "1Day",
-                             limit: int = 200) -> dict[str, pd.DataFrame]:
+                             limit: int = 200,
+                             completed_only: bool = False,
+                             as_of: datetime | None = None) -> dict[str, pd.DataFrame]:
         """Fetch bars for many symbols in batched multi-symbol requests.
 
         Collapses N per-symbol calls into ceil(N/200) calls — the real fix for
         the rate limit (200 req/min), since concurrency can't beat that ceiling.
+
+        With ``completed_only`` (daily bars only) today's still-forming bar is
+        excluded. Signals were backtested on completed bars with a next-open
+        fill; computing them on a partial bar fires on intraday noise instead.
         """
+        cutoff = None
+        if completed_only:
+            if timeframe != "1Day":
+                raise ValueError("completed_only is only defined for daily bars")
+            now = as_of or datetime.now(ZoneInfo("America/New_York"))
+            if now.tzinfo is None:
+                raise ValueError("as_of must be timezone-aware")
+            cutoff = now.astimezone(ZoneInfo("America/New_York")).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
         result: dict[str, pd.DataFrame] = {}
         # Multi-symbol endpoint caps the symbol list per request; chunk to stay safe.
         CHUNK = 100
@@ -163,6 +179,8 @@ class AlpacaClient:
                 "feed": "iex",
                 "start": self._default_start(timeframe, limit),
             }
+            if cutoff is not None:
+                params["end"] = (cutoff - timedelta(seconds=1)).isoformat()
             next_token = None
             while True:
                 if next_token:
@@ -180,6 +198,8 @@ class AlpacaClient:
                 next_token = data.get("next_page_token")
                 if not next_token:
                     break
+        if cutoff is not None:
+            result = {sym: df.loc[df.index < cutoff] for sym, df in result.items()}
         return result
 
     async def get_latest_quote(self, symbol: str) -> dict:

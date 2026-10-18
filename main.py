@@ -38,6 +38,7 @@ from risk.stop_loss import StopLossManager
 from storage.db import Database
 from strategy.mean_reversion import MeanReversionStrategy
 from strategy.momentum import MomentumStrategy
+from strategy.regime import REGIME_SYMBOL, market_uptrend
 from strategy.whale_follow import WhaleFollowStrategy
 
 logger = structlog.get_logger()
@@ -50,6 +51,9 @@ class StockPilot:
         self._shutdown_started = False
         self._trading_task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
+        # New entries only while SPY closes above this SMA; 0 disables the gate.
+        self.regime_sma = int(os.getenv("REGIME_FILTER_SMA", "50"))
+        self._entries_allowed = True
 
     async def start(self):
         logger.info("stockpilot_starting")
@@ -495,11 +499,20 @@ class StockPilot:
 
         # 7. Calculate technicals — one multi-symbol fetch instead of N calls
         tech_data = {}
+        request = universe if REGIME_SYMBOL in universe else [*universe, REGIME_SYMBOL]
         try:
-            bars_by_symbol = await self.alpaca.get_bars_multi(universe, "1Day", limit=200)
+            # Completed sessions only: signals were validated on the prior
+            # close with a next-open fill, not on a still-forming bar.
+            bars_by_symbol = await self.alpaca.get_bars_multi(
+                request, "1Day", limit=200, completed_only=True
+            )
         except Exception as e:
             logger.error("bars_multi_error", error=str(e))
             bars_by_symbol = {}
+        regime_bars = bars_by_symbol.get(REGIME_SYMBOL)
+        if REGIME_SYMBOL not in universe:
+            bars_by_symbol.pop(REGIME_SYMBOL, None)
+        entries_allowed = await self._update_regime(regime_bars)
         for symbol, bars in bars_by_symbol.items():
             try:
                 if not bars.empty:
@@ -542,8 +555,12 @@ class StockPilot:
             )
 
         trades_executed = 0
+        regime_skipped = 0
         for sig in all_signals:
             if sig.score < self.config.strategy.min_signal_score:
+                continue
+            if sig.action.value == "BUY" and not entries_allowed:
+                regime_skipped += 1
                 continue
 
             current_price = tech_data.get(sig.symbol, {}).get("price")
@@ -597,6 +614,8 @@ class StockPilot:
 
         if trades_executed:
             logger.info("trades_executed", count=trades_executed)
+        if regime_skipped:
+            logger.info("entries_blocked_regime", signals=regime_skipped)
 
         # Hourly heartbeat (fires in any state via the shared helper)
         top = all_signals[0] if all_signals else None
@@ -605,7 +624,8 @@ class StockPilot:
             float(account.get("equity", 0)),
             len(positions),
             f"Signale {len(all_signals)} (Top: {top_str}, Schwelle "
-            f"{self.config.strategy.min_signal_score})",
+            f"{self.config.strategy.min_signal_score})"
+            + ("" if entries_allowed else " | Käufe pausiert (Regime)"),
         )
 
         # 12. (Daily summary now fires on the market open->closed transition —
@@ -616,6 +636,32 @@ class StockPilot:
 
         # 14. Wait for next scan
         await asyncio.sleep(self.config.strategy.scan_interval_seconds)
+
+    async def _update_regime(self, spy_bars) -> bool:
+        """Return whether new entries are allowed; notify once on every change."""
+        if self.regime_sma <= 0:
+            return True
+        uptrend = market_uptrend(spy_bars, self.regime_sma)
+        # Unknown regime (missing SPY data) blocks entries: buying blind is
+        # the riskier failure. Exits and stops are unaffected either way.
+        allowed = uptrend is True
+        if allowed != self._entries_allowed:
+            self._entries_allowed = allowed
+            logger.info("regime_changed", entries_allowed=allowed, uptrend=uptrend)
+            if allowed:
+                msg = f"📈 Markt-Regime: SPY über SMA{self.regime_sma} — neue Käufe wieder aktiv."
+            elif uptrend is None:
+                msg = (
+                    "⚠️ Markt-Regime unbekannt (keine SPY-Daten) — neue Käufe pausiert. "
+                    "Offene Positionen und Stops laufen weiter."
+                )
+            else:
+                msg = (
+                    f"📉 Markt-Regime: SPY unter SMA{self.regime_sma} — keine neuen Käufe. "
+                    "Offene Positionen und Stops laufen weiter."
+                )
+            await self.telegram.send(msg)
+        return allowed
 
     def _is_near_close(self, clock: dict) -> bool:
         next_close = clock.get("next_close", "")

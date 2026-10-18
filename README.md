@@ -27,9 +27,10 @@ StockPilot separates those concerns. Four independent signal sources are merged 
 ## Features
 
 - **Four signal sources, weighted** — momentum, mean reversion, 13F whale-following and an LLM analyst, merged into a single score with a configurable entry threshold.
-- **Two-tier LLM analysis** — Claude Haiku screens candidates cheaply; only survivors reach Claude Sonnet for full analysis (technicals + news + institutional flow + macro). A per-scan call budget caps token spend; the static system prompt is cached.
+- **Two-tier LLM analysis** — Claude Haiku screens candidates cheaply; only survivors reach Claude Sonnet for full analysis (technicals + news + institutional flow + macro). A per-scan call budget caps token spend, decisions are cached per symbol per day, and the static system prompt is cached.
 - **13F institutional tracking** — parses SEC EDGAR filings for 8 funds (Berkshire Hathaway, Bridgewater, Soros, Renaissance Technologies, Citadel, Pershing Square, Third Point, Appaloosa), diffs consecutive quarters and resolves issuer names to tradeable tickers to build a buy-consensus signal.
 - **Risk-based position sizing** — each trade is sized so that being stopped out costs the same fraction of equity (default 0.25%), so a wide-stop name gets a small position rather than the same weight as a tight-stop one. Bounded by a hard 5% per-position cap.
+- **Market-regime gate** — new entries only while SPY's last completed close is above its 50-day SMA; open positions and stops are unaffected. Telegram reports each switch. Signals use completed daily bars, matching the backtest's next-open fill.
 - **Hard risk layer** — per-position cap, max concurrent positions, GICS sector limits, minimum cash reserve, daily and weekly drawdown circuit breakers, and no averaging into an existing position.
 - **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. ATR uses completed daily bars. GTC stops remain at the broker while the bot is offline, subject to market hours and execution conditions. Rejected replacements preserve existing protection; reconciliation checks quantity and status and blocks new entries when coverage is unconfirmed.
 - **Long-only execution** — sell signals close existing long positions. Conflicting strategy and Claude actions are skipped. Execution records use broker fill prices and quantities; pending exits block competing sell orders.
@@ -154,6 +155,8 @@ Tuning knobs (defaults shipped in `.env.example`):
 | `MAX_POSITION_PCT` / `MAX_POSITIONS` | `0.03` / `15` | Base position weight, max concurrent positions |
 | `MAX_SECTOR_PCT` / `MAX_PORTFOLIO_INVESTED` | `0.40` / `0.80` | Sector cap, minimum cash reserve |
 | `DAILY_DRAWDOWN_LIMIT` / `WEEKLY_DRAWDOWN_LIMIT` | `0.02` / `0.05` | Circuit breakers |
+| `RISK_PER_TRADE` | `0.0025` | Equity fraction lost if a position hits its initial stop |
+| `REGIME_FILTER_SMA` | `50` | New entries only while SPY closes above this SMA (`0` = off) |
 | `ATR_INITIAL_STOP_FACTOR` / `ATR_TRAILING_FACTOR` | `2.0` / `2.5` | Stop distance in ATR multiples |
 | `SCREENER_MIN_VOLUME` / `SCREENER_MIN_PRICE` | `200000` / `5` | Liquidity filter (volume measured on the IEX feed) |
 | `MAX_CLAUDE_CALLS_PER_SCAN` | `12` | Token-cost ceiling per scan |
@@ -184,6 +187,9 @@ python -m backtest.exit_compare
 # Position sizing: flat percentage vs risk-based, cooldown, portfolio stop
 python -m backtest.risk_sizing_compare
 
+# Market-regime gate: none vs SPY>SMA200 vs SPY>SMA50 vs breadth
+python -m backtest.regime_compare
+
 # Position sizing: flat vs volatility-scaled (earlier experiment)
 python -m backtest.sizing_compare
 ```
@@ -194,7 +200,7 @@ Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/ki
 
 Parameters are chosen by controlled backtest, not intuition. Each experiment
 freezes everything except the variable under test, and the trade count is
-reported so an unchanged entry set is verifiable. Two examples:
+reported so an unchanged entry set is verifiable. Three examples:
 
 **Exit model** — the original two-stage trailing stop returned more on paper
 but carried an −83.7% drawdown. Continuous ATR trailing at N=2.5 more than
@@ -205,6 +211,12 @@ same portfolio weight as a quiet one, so it risked 3–4× more per trade. Sizin
 by stop distance left the Sharpe ratio unchanged but halved the worst single
 trade (−$506 → −$267). It shipped for the risk reduction, not for return.
 
+**Regime gate** — when a forward-test run lost money, the same backtest over the
+same weeks lost even more: the strategy, not the code, failed in a sideways
+market. Gating new entries on SPY above its 50-day SMA raised Sharpe from 0.49
+to 0.76 — and is documented as *not* fixing that sideways window, which no
+trend filter detects.
+
 Rejected changes are documented too, including a portfolio-level stop that
 looked appealing and tested at −0.49 Sharpe.
 
@@ -214,8 +226,8 @@ Full results, including the reasoning and the rejected variants:
 Backtests only decide whether a change ships. Whether the strategy actually
 works is a separate question, answered by forward testing on unseen data —
 tracked in [FORWARD-TEST.md](FORWARD-TEST.md) against pass/fail criteria that
-were fixed before data collection began. The most recent completed run failed
-3 of 6 criteria; that is recorded there rather than quietly dropped.
+were fixed before data collection began. The two most recent completed runs
+failed 3 and 4 of 6 criteria; both are recorded there rather than quietly dropped.
 
 ## Safety
 

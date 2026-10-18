@@ -106,6 +106,63 @@ every earlier level that looked identical at the time.
 
 ---
 
+## 4. Market-regime gate
+
+**Question:** forward-test run 4 lost 3.0%. Was that the live implementation,
+or the strategy?
+
+**Out-of-sample check first.** The unchanged backtest over the same six weeks:
+
+| Window | Backtest | SPY |
+|---|---|---|
+| Before run 3 (in-sample) | +4.7%, Sharpe 0.78 | — |
+| Run 3 (29 Jun – 21 Aug) | +2.6%, Sharpe 1.82 | +3.3% |
+| **Run 4 (24 Aug – 5 Oct)** | **−5.8%, Sharpe −8.19** | **+0.1%** |
+
+The backtest lost *more* than live. The strategy, not the plumbing, failed:
+long-only momentum gets whipsawed when the market goes sideways.
+
+**Tested:** gate new entries on a textbook regime filter, standard parameters
+only. Decision rule fixed before running: adopt only if Sharpe improves both
+over the full period *and* in-sample, keeping ≥ 60% of trades. The run-4
+window is reported but cannot decide, because it prompted the test.
+
+| Gate | Sharpe | In-sample Sharpe | MaxDD | PF | #Tr | Run-4 window |
+|---|---|---|---|---|---|---|
+| None (baseline) | 0.49 | 1.12 | −7.0% | 1.20 | 225 | −6.4% |
+| SPY > SMA200 | 0.69 | 1.38 | −7.0% | 1.29 | 219 | −6.3% |
+| **SPY > SMA50** | **0.76** | **1.70** | −6.7% | **1.35** | 195 | −6.1% |
+| Breadth ≥ 50% above SMA50 | 0.67 | 1.32 | **−4.6%** | 1.34 | 172 | −4.2% |
+
+**Decision: SPY > SMA50.** All three passed the rule; SMA50 had the best
+Sharpe and profit factor at the same simplicity as SMA200.
+
+**What it does not fix:** run 4. SPY closed above its SMA50 on 26 of those 30
+days — the market chopped sideways *above* its averages, which no trend gate
+detects. That weakness is documented here rather than tuned away; fitting a
+fourth filter to the one window that motivated the search would be
+curve-fitting by construction.
+
+*Note on baselines:* the absolute numbers differ from section 2 because this
+run includes six more weeks of data — including run 4's losses.
+
+Harness: [`backtest/regime_compare.py`](../backtest/regime_compare.py)
+
+### Live-vs-backtest deviations found on the way
+
+None of these caused run 4's loss (the backtest lost more), but each meant the
+live bot traded a model that had never been tested:
+
+- Signals were computed on the **still-forming** daily bar; the backtest uses
+  the completed bar and fills at the next open.
+- Signals without Claude confirmation were scored **×0.9**, silently lifting
+  the effective entry threshold from 0.65 to ~0.72 — a level that tested worse.
+- The initial stop was measured from the **signal-time price**, not the fill.
+
+All three were aligned with the backtest on 2026-10-18.
+
+---
+
 ## Live forward test
 
 Backtests decide *whether* a change ships. They do not establish that the
@@ -115,6 +172,5 @@ Current status and the pre-registered pass/fail criteria live in
 [`FORWARD-TEST.md`](../FORWARD-TEST.md). The criteria were fixed before data
 collection started and have not been changed since.
 
-The most recent completed run failed 3 of 6 criteria (Sharpe −0.07, profit
-factor 0.82, and a stop-coverage bug), which is documented there rather than
-quietly dropped.
+The two most recent completed runs failed 3 and 4 of 6 criteria. Both are
+documented there, with diagnoses, rather than quietly dropped.

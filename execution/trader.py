@@ -54,6 +54,22 @@ class Trader:
         return order
 
     @staticmethod
+    def _anchor_stop(
+        signal_stop: float | None, reference_price: float | None, fill_price: float
+    ) -> float | None:
+        """Keep the strategy's stop distance, measured from the actual fill.
+
+        Signals use the last completed close, but the market order fills at
+        today's price. Re-anchoring reproduces the backtested entry - 2*ATR,
+        and after a gap down it avoids a sell stop above the market, which
+        the broker rejects.
+        """
+        if not signal_stop or not reference_price or signal_stop >= reference_price:
+            return signal_stop
+        anchored = round(fill_price - (reference_price - signal_stop), 2)
+        return anchored if anchored > 0 else signal_stop
+
+    @staticmethod
     def _trade_from_fill(order_id: str, signal: Signal, order: dict) -> TradeRecord:
         qty = float(order.get("filled_qty") or 0)
         price = float(order.get("filled_avg_price") or 0)
@@ -297,17 +313,21 @@ class Trader:
                 )
                 order = await self._wait_for_fill(order)
                 trade = self._trade_from_fill(order["id"], self.pending_orders[order["id"]], order)
+                stop_price = self._anchor_stop(signal.stop_loss_price, current_price, trade.price)
+                trade = trade.model_copy(update={"stop_loss": stop_price})
                 qty = trade.qty
                 await self.db.log_trade(trade)
                 await self._forget_pending(order["id"])
-                if signal.stop_loss_price:
+                if stop_price:
                     stop_order = await self._submit_tracked(
-                        signal.model_copy(update={"action": Action.SELL}),
+                        signal.model_copy(
+                            update={"action": Action.SELL, "stop_loss_price": stop_price}
+                        ),
                         symbol=signal.symbol,
                         qty=qty,
                         side="sell",
                         order_type="stop",
-                        stop_price=signal.stop_loss_price,
+                        stop_price=stop_price,
                         time_in_force="gtc",
                     )
                     # Acknowledged protection is managed by StopLossManager.
@@ -316,7 +336,8 @@ class Trader:
                         "stop_loss_placed",
                         symbol=signal.symbol,
                         qty=qty,
-                        stop_price=signal.stop_loss_price,
+                        stop_price=stop_price,
+                        signal_stop=signal.stop_loss_price,
                         order_id=stop_order.get("id"),
                     )
                 else:

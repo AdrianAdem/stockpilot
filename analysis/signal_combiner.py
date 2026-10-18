@@ -133,7 +133,10 @@ class SignalCombiner:
                         label = f"combined({strat_names}) [CLAUDE OFFLINE]"
                     else:
                         label = f"combined({strat_names}) [no claude confirm]"
-                    final_score = strategy_score * 0.90
+                    # Undiscounted: the 0.65 entry threshold was backtested on
+                    # the plain strategy score. A 0.9 haircut silently raised the
+                    # live threshold to ~0.72, a level that tested worse.
+                    final_score = strategy_score
                     if final_score > 0.5:
                         combined.append(
                             Signal(
@@ -149,9 +152,9 @@ class SignalCombiner:
                         )
             elif strategy_score > claude_gate:
                 # Above the gate but Claude budget spent this scan — still allow
-                # a strong strategy-only signal through (discounted).
+                # a strategy-only signal through, scored like the backtest.
                 strat_names = "+".join(sorted(s.strategy for s in signals))
-                final_score = strategy_score * 0.90
+                final_score = strategy_score
                 if final_score > 0.5:
                     combined.append(
                         Signal(
