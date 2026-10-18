@@ -90,7 +90,9 @@ class BacktestEngine:
                 df = bars_data.get(symbol)
                 if df is None or df.empty:
                     continue
-                mask = df.index <= pd.Timestamp(date, tz="UTC")
+                # Daily bars are stamped at New York midnight (04:00/05:00Z). Comparing
+                # against UTC midnight dropped day d's own bar, so signals lagged a session.
+                mask = df.index <= pd.Timestamp(date, tz="America/New_York")
                 historical = df[mask].tail(lookback)
                 if len(historical) >= 50:
                     tech_data[symbol] = self.technical.calculate_all(historical)

@@ -95,7 +95,9 @@ async def build_entries(symbols, bars):
         # compute tech up to today, generate signals
         tech = {}
         for s, df in bars.items():
-            mask = df.index <= pd.Timestamp(date, tz="UTC")
+            # Daily bars are stamped at New York midnight (04:00/05:00Z). Comparing
+            # against UTC midnight dropped day d's own bar, so signals lagged a session.
+            mask = df.index <= pd.Timestamp(date, tz="America/New_York")
             hist = df[mask].tail(LOOKBACK)
             if len(hist) >= 50:
                 tech[s] = ta.calculate_all(hist)
