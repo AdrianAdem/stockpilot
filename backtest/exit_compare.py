@@ -123,10 +123,14 @@ async def build_entries(symbols, bars):
 
     # attach ATR + rel_vol at entry from the arrays
     enriched = []
-    for sym, idx, px, date in entries:
+    for sym, idx, px, _date in entries:
         a = arr[sym]
-        row = a.loc[date]
-        atr = float(row.get("atr_14", 0)) if "atr_14" in a.columns else 0.0
+        # ATR as known at the signal close (day before the fill). The fill
+        # day's own row includes that day's high/low, unknown at the open.
+        prev = dates[idx - 1]
+        if prev not in a.index or "atr_14" not in a.columns:
+            continue
+        atr = float(a.loc[prev, "atr_14"])
         enriched.append(
             Trade(
                 symbol=sym, entry_idx=idx, entry_price=px, atr=atr, rel_vol=(atr / px if px else 0)
@@ -159,17 +163,18 @@ def replay(trade: Trade, dates, arr, exit_model, median_rv):
     else:
         n = None
 
-    for k in range(trade.entry_idx + 1, len(dates)):
+    # The entry fills at day entry_idx's open, so its low can already hit the stop.
+    for k in range(trade.entry_idx, len(dates)):
         date = dates[k]
         if date not in a.index:
             continue
         row = a.loc[date]
-        low, _high, close = float(row["low"]), float(row["high"]), float(row["close"])
+        low, close = float(row["low"]), float(row["close"])
         atr_now = float(row["atr_14"]) if not pd.isna(row["atr_14"]) else trade.atr
 
-        # 1. intraday stop hit?
+        # 1. intraday stop hit? A gap below the stop fills at the open.
         if low <= stop:
-            return k, stop * (1 - SLIPPAGE)
+            return k, min(float(row["open"]), stop) * (1 - SLIPPAGE)
 
         # 2. raise stop per model (only upward)
         gain = (close - entry) / entry

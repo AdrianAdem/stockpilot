@@ -159,8 +159,12 @@ lookahead, but not the model the live bot runs. Fixed to compare against New
 York midnight.
 
 **Gap-down stop fills.** A stop gapped through at the open was filled at the
-stop price. It now fills at the open. This turned the worst single trades from
-roughly −$500 into −$1,100 to −$2,700 for flat sizing.
+stop price. It now fills at the open, in every harness. This turned the worst
+single trades from roughly −$500 into −$1,100 to −$2,700 for flat sizing.
+
+**Exit harness specifics.** It also took the initial ATR from the fill day's
+row — which includes that day's high and low, unknown at the open — and never
+checked the stop on the entry day itself. Both fixed.
 
 **Fill order.** With 15 slots and an 80% invested cap, *which* same-day
 candidates get filled matters. The order was whatever the data API returned,
@@ -184,7 +188,7 @@ trade quality.
 
 | Decision | Original | Re-run | Holds? |
 |---|---|---|---|
-| Exit: ATR trailing N=2.5 | Sharpe 1.38 vs 0.65 (2-stage) | 1.36 vs 0.57; N=1.5 now 1.45 | Yes — gap 0.09 is inside the 0.1 tiebreak |
+| Exit: ATR trailing N=2.5 | Sharpe 1.38 vs 0.65 (2-stage) | **0.99** vs 0.67; N=1.5 0.64, N=3.5 0.65, adaptive 0.56 | Yes, clearly — but its top 3 trades are 86% of the profit |
 | Sizing: risk 0.25% per trade | Sharpe 0.72 = 0.72, worst −$267 vs −$506 | **0.29 vs 0.13**, worst −$491 vs −$1,119, MaxDD −8.7% vs −11.4% | Yes, more clearly |
 | Regime gate | SPY > SMA50 adopted | rejected | **No** |
 

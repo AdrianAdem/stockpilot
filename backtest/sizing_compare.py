@@ -192,7 +192,8 @@ def simulate(model, dates, arr, cands_by_date, median_rv):
             low, close = float(b["low"]), float(b["close"])
             atr_now = float(b["atr_14"]) if not pd.isna(b["atr_14"]) else p["atr"]
             if low <= p["stop"]:
-                exit_px = p["stop"] * (1 - SLIPPAGE)
+                # A gap below the stop fills at the open, not at the stop price.
+                exit_px = min(float(b["open"]), p["stop"]) * (1 - SLIPPAGE)
                 cash += p["qty"] * exit_px
                 trades.append(
                     {

@@ -7,9 +7,13 @@ afterwards.
 
 ## Current run
 **Run 5: 2026-10-19 → 2026-11-30** (6 weeks).
-First run in which the live bot trades the model the backtest actually tested:
-completed daily bars, one entry attempt per signal near the open, the plain
-strategy score against the 0.65 threshold, and a `fill − 2×ATR` initial stop.
+First run whose *entries* follow the backtested model: completed daily bars,
+one attempt per signal near the open, the plain strategy score against the 0.65
+threshold, and a `fill − 2×ATR` initial stop.
+
+Still live-only, with no backtest counterpart — keep these in mind when comparing:
+whale-following (weight 0.25 in the blend), the Claude veto, the 50% partial
+take-profit at a strategy target, and the 10-day time stop.
 
 ---
 
@@ -137,9 +141,10 @@ under its intended conditions.
   roughly **+0.4% over six weeks**, inside the noise. A flat or slightly
   negative run 5 is the expected outcome, not a malfunction.
 - The useful question for run 5: does live P&L now track the backtest over the
-  same weeks? Compare both at the end. A large gap means a remaining
-  implementation difference; a small gap with a poor result means the
-  strategy needs new ideas, not more tuning.
+  same weeks? Compare both at the end. A large gap points first to the four
+  live-only components listed above, then to implementation differences; a
+  small gap with a poor result means the strategy needs new ideas, not more
+  tuning.
 - Entries happen only in the first hour after the open. On days the machine is
   asleep at the open, the bot will not buy — exits and stops are unaffected.
 
