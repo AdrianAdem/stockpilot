@@ -57,17 +57,21 @@ class Trader:
     def _anchor_stop(
         signal_stop: float | None, reference_price: float | None, fill_price: float
     ) -> float | None:
-        """Keep the strategy's stop distance, measured from the actual fill.
+        """Keep the signal's stop distance, measured from the actual fill.
 
         Signals use the last completed close, but the market order fills at
         today's price. Re-anchoring reproduces the backtested entry - 2*ATR,
         and after a gap down it avoids a sell stop above the market, which
-        the broker rejects.
+        the broker rejects. Returns None rather than a stop at or above the
+        fill; reconciliation then places an ATR stop for the position.
         """
-        if not signal_stop or not reference_price or signal_stop >= reference_price:
+        if signal_stop and reference_price and 0 < signal_stop < reference_price:
+            anchored = round(fill_price - (reference_price - signal_stop), 2)
+            if 0 < anchored < fill_price:
+                return anchored
+        if signal_stop and 0 < signal_stop < fill_price:
             return signal_stop
-        anchored = round(fill_price - (reference_price - signal_stop), 2)
-        return anchored if anchored > 0 else signal_stop
+        return None
 
     @staticmethod
     def _trade_from_fill(order_id: str, signal: Signal, order: dict) -> TradeRecord:
@@ -275,6 +279,17 @@ class Trader:
             if not signal.stop_loss_price or signal.stop_loss_price <= 0:
                 logger.warning("order_blocked", symbol=signal.symbol, reason="missing_stop")
                 return None
+            if current_price and signal.stop_loss_price >= current_price:
+                # A sell stop at or above the market is rejected by the broker
+                # after the entry has already filled, leaving it unprotected.
+                logger.warning(
+                    "order_blocked",
+                    symbol=signal.symbol,
+                    reason="stop_not_below_price",
+                    stop=signal.stop_loss_price,
+                    price=current_price,
+                )
+                return None
             intended_value = qty * (current_price or signal.stop_loss_price or 0)
             if not self.pm.can_open_position(signal.symbol, positions, account, intended_value):
                 return None
@@ -341,10 +356,13 @@ class Trader:
                         order_id=stop_order.get("id"),
                     )
                 else:
-                    logger.warning(
+                    # The main loop reconciles stops right after this returns,
+                    # which places an ATR stop for the uncovered position.
+                    logger.error(
                         "no_stop_loss_for_buy",
                         symbol=signal.symbol,
-                        reason="signal_had_no_stop_price",
+                        reason="no_valid_stop_below_fill",
+                        fill=trade.price,
                     )
 
             elif signal.action.value == "SELL":

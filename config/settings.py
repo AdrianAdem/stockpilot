@@ -42,11 +42,10 @@ class RiskConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     scan_interval_seconds: int = 900
-    min_signal_score: float = 0.6
+    min_signal_score: float = 0.65
     momentum_weight: float = 0.30
     mean_reversion_weight: float = 0.25
     whale_follow_weight: float = 0.25
-    claude_weight: float = 0.20
 
 
 class Settings(BaseModel):
@@ -88,11 +87,10 @@ def load_config() -> Settings:
         ),
         strategy=StrategyConfig(
             scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "900")),
-            min_signal_score=float(os.getenv("MIN_SIGNAL_SCORE", "0.6")),
+            min_signal_score=float(os.getenv("MIN_SIGNAL_SCORE", "0.65")),
             momentum_weight=float(os.getenv("MOMENTUM_WEIGHT", "0.30")),
             mean_reversion_weight=float(os.getenv("MEAN_REVERSION_WEIGHT", "0.25")),
             whale_follow_weight=float(os.getenv("WHALE_FOLLOW_WEIGHT", "0.25")),
-            claude_weight=float(os.getenv("CLAUDE_WEIGHT", "0.20")),
         ),
         fred_api_key=os.environ["FRED_API_KEY"],
         sec_user_agent=os.getenv("SEC_USER_AGENT", "stockpilot user@example.com"),

@@ -1,8 +1,8 @@
 """Live signal path must match what was backtested.
 
-The backtest computes signals on completed daily bars, fills at the next
-open with a stop at entry - 2*ATR, trades only while SPY is above its 50-day
-SMA, and applies the 0.65 threshold to the undiscounted strategy score.
+The backtest computes signals on completed daily bars, fills each signal
+once at the next open with a stop at entry - 2*ATR, and applies the 0.65
+threshold to the plain strategy score.
 """
 
 import asyncio
@@ -15,7 +15,6 @@ import pytest
 from analysis.claude_analyst import ClaudeAnalyst
 from data.alpaca_client import AlpacaClient
 from execution.trader import Trader
-from strategy.regime import market_uptrend
 
 
 def _bar(day: int, close: float = 100.0) -> dict:
@@ -62,23 +61,6 @@ class TestCompletedBarsMulti:
             asyncio.run(client.get_bars_multi(["AAPL"], "1Hour", completed_only=True))
 
 
-class TestRegime:
-    @staticmethod
-    def _bars(closes):
-        return pd.DataFrame({"close": closes})
-
-    def test_uptrend_when_last_close_above_sma(self):
-        assert market_uptrend(self._bars([100.0] * 49 + [110.0]), sma_length=50) is True
-
-    def test_no_uptrend_when_last_close_below_sma(self):
-        assert market_uptrend(self._bars([100.0] * 49 + [90.0]), sma_length=50) is False
-
-    def test_undecidable_without_enough_history(self):
-        assert market_uptrend(self._bars([100.0] * 10), sma_length=50) is None
-        assert market_uptrend(None) is None
-        assert market_uptrend(pd.DataFrame()) is None
-
-
 class TestStopAnchoredToFill:
     def test_gap_up_keeps_atr_distance_below_fill(self):
         # signal: close 100, stop 96 (2*ATR = 4); market fills at 103
@@ -91,7 +73,7 @@ class TestStopAnchoredToFill:
     def test_unusable_inputs_fall_back_to_signal_stop(self):
         assert Trader._anchor_stop(96.0, None, 103.0) == 96.0
         assert Trader._anchor_stop(None, 100.0, 103.0) is None
-        assert Trader._anchor_stop(101.0, 100.0, 103.0) == 101.0
+        assert Trader._anchor_stop(101.0, 100.0, 103.0) == 101.0  # still below the fill
 
 
 class TestClaudeCostControls:
@@ -141,44 +123,128 @@ class TestClaudeCostControls:
         assert analyst.api_healthy is False
 
 
-class TestRegimeGateInLoop:
-    """The gate blocks new longs only; exits must keep working."""
+def _strategy(score: float, stop: float = 95.0):
+    from types import SimpleNamespace
+
+    from storage.models import Action, Signal
+
+    sig = Signal(
+        symbol="AAPL",
+        action=Action.BUY,
+        score=score,
+        strategy="momentum",
+        stop_loss_price=stop,
+    )
+    return SimpleNamespace(
+        name="momentum", weight=1.0, generate_signals=AsyncMock(return_value=[sig])
+    )
+
+
+def _claude(answer):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(api_healthy=True, analyze_for_signal=AsyncMock(return_value=answer))
+
+
+class TestClaudeIsVetoOnly:
+    """Claude may drop a setup; it must never move the score the threshold sees."""
 
     @staticmethod
-    def _run(action, spy_closes, positions):
-        from unittest.mock import patch
+    def _combine(score, claude, **kwargs):
+        from analysis.signal_combiner import SignalCombiner
+
+        combiner = SignalCombiner([_strategy(score)], claude, min_score=0.65)
+        return asyncio.run(combiner.generate_combined_signals(["AAPL"], {"AAPL": {}}, **kwargs))
+
+    def test_confirmation_keeps_strategy_score_and_stop(self):
+        from storage.models import Action, Signal
+
+        confirm = Signal(
+            symbol="AAPL", action=Action.BUY, score=0.55, strategy="claude", stop_loss_price=50.0
+        )
+        [sig] = self._combine(0.66, _claude(confirm))
+        assert sig.score == 0.66  # a lukewarm "yes" no longer drags it below 0.65
+        assert sig.stop_loss_price == 95.0  # the strategy's backtested stop, not Claude's
+
+    def test_skip_keeps_strategy_score(self):
+        [sig] = self._combine(0.66, _claude(None))
+        assert sig.score == 0.66
+
+    def test_below_threshold_is_not_sent_to_claude(self):
+        claude = _claude(None)
+        assert self._combine(0.60, claude) == []
+        claude.analyze_for_signal.assert_not_awaited()
+
+
+class TestEntryTiming:
+    """One fill attempt per signal, near the open — as in the backtest."""
+
+    @staticmethod
+    def _bot(window: int, tech: dict | None = None):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
 
         from storage.models import Action
         from tests.test_long_only import signal, stockpilot_for_signal
 
-        sig = signal(Action[action])
-        bot = stockpilot_for_signal(sig, positions)
-        bot.regime_sma = 50
-        bot._entries_allowed = True
-        spy = pd.DataFrame({"close": spy_closes})
-        bot.alpaca.get_bars_multi = AsyncMock(return_value={"SPY": spy})
-        bot.position_sizer.calculate.return_value = type("S", (), {"shares": 5})()
+        bot = stockpilot_for_signal(signal(Action.BUY), [])
+        bot.entry_window_minutes = window
+        bot._entry_attempts = {}
+        bot.initial_stop_factor = 2.0
+        bot.position_sizer.calculate.return_value = SimpleNamespace(shares=5)
+        if tech is not None:
+            bot.alpaca.get_bars_multi = AsyncMock(
+                return_value={"AAPL": pd.DataFrame({"close": [1]})}
+            )
+            bot.technical = SimpleNamespace(calculate_all=Mock(return_value=tech))
+        return bot
+
+    @staticmethod
+    def _scan(bot, ny_time: str):
+        from unittest.mock import patch
+        from zoneinfo import ZoneInfo
+
+        fixed = datetime.fromisoformat(f"2026-10-19T{ny_time}").replace(
+            tzinfo=ZoneInfo("America/New_York")
+        )
+
+        class FrozenClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
         with (
+            patch("main.datetime", FrozenClock),
             patch("main.get_universe", new=AsyncMock(return_value=["AAPL"])),
             patch("main.asyncio.sleep", new_callable=AsyncMock),
         ):
             asyncio.run(bot._trading_loop())
-        return bot
 
-    def test_downtrend_blocks_buy_and_notifies_once(self):
-        bot = self._run("BUY", [100.0] * 49 + [90.0], [])
+    def test_entry_inside_window(self):
+        bot = self._bot(window=60)
+        self._scan(bot, "09:45:00")
+        bot.trader.execute.assert_awaited_once()
+
+    def test_no_entry_after_window(self):
+        bot = self._bot(window=60)
+        self._scan(bot, "11:00:00")
         bot.trader.execute.assert_not_awaited()
-        bot.telegram.send.assert_awaited_once()
-        assert "keine neuen Käufe" in bot.telegram.send.await_args.args[0]
-        kwargs = bot.alpaca.get_bars_multi.await_args.kwargs
-        assert kwargs["completed_only"] is True
-        assert "SPY" in bot.alpaca.get_bars_multi.await_args.args[0]
 
-    def test_downtrend_still_allows_exits(self):
-        bot = self._run("SELL", [100.0] * 49 + [90.0], [{"symbol": "AAPL", "qty": "7"}])
+    def test_symbol_is_not_rebought_the_same_day(self):
+        # e.g. stopped out between scans: the completed-bar signal is unchanged
+        bot = self._bot(window=60)
+        self._scan(bot, "09:35:00")
+        self._scan(bot, "09:50:00")
         bot.trader.execute.assert_awaited_once()
 
-    def test_uptrend_allows_buy(self):
-        bot = self._run("BUY", [100.0] * 49 + [110.0], [])
-        bot.trader.execute.assert_awaited_once()
-        bot.telegram.send.assert_not_awaited()
+    def test_initial_stop_is_two_atr_for_every_strategy(self):
+        bot = self._bot(window=0, tech={"price": 100.0, "ATR": 3.0})
+        self._scan(bot, "10:00:00")
+        sent = bot.trader.execute.await_args.kwargs["signal"]
+        assert sent.stop_loss_price == 94.0
+
+
+class TestTraderStopGuards:
+    def test_anchor_never_returns_a_stop_at_or_above_the_fill(self):
+        assert Trader._anchor_stop(5.0, 100.0, 4.0) is None
+        assert Trader._anchor_stop(5.0, None, 4.0) is None

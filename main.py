@@ -3,6 +3,7 @@ import os
 import signal
 import sys
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -38,7 +39,6 @@ from risk.stop_loss import StopLossManager
 from storage.db import Database
 from strategy.mean_reversion import MeanReversionStrategy
 from strategy.momentum import MomentumStrategy
-from strategy.regime import REGIME_SYMBOL, market_uptrend
 from strategy.whale_follow import WhaleFollowStrategy
 
 logger = structlog.get_logger()
@@ -51,9 +51,13 @@ class StockPilot:
         self._shutdown_started = False
         self._trading_task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
-        # New entries only while SPY closes above this SMA; 0 disables the gate.
-        self.regime_sma = int(os.getenv("REGIME_FILTER_SMA", "50"))
-        self._entries_allowed = True
+        # The backtest fills each signal once, at the next open. Entries are
+        # therefore limited to the first minutes of the session (0 = no limit)
+        # and to one attempt per symbol per day — otherwise an unchanged
+        # completed-bar signal re-buys a name right after it was stopped out.
+        self.entry_window_minutes = int(os.getenv("ENTRY_WINDOW_MINUTES", "60"))
+        self._entry_attempts: dict[str, str] = {}
+        self.initial_stop_factor = float(os.getenv("ATR_INITIAL_STOP_FACTOR", "2.0"))
 
     async def start(self):
         logger.info("stockpilot_starting")
@@ -117,7 +121,6 @@ class StockPilot:
         self.combiner = SignalCombiner(
             strategies,
             self.claude,
-            weight_claude=self.config.strategy.claude_weight,
             min_score=self.config.strategy.min_signal_score,
             max_claude_calls=int(os.getenv("MAX_CLAUDE_CALLS_PER_SCAN", "12")),
         )
@@ -499,20 +502,15 @@ class StockPilot:
 
         # 7. Calculate technicals — one multi-symbol fetch instead of N calls
         tech_data = {}
-        request = universe if REGIME_SYMBOL in universe else [*universe, REGIME_SYMBOL]
         try:
             # Completed sessions only: signals were validated on the prior
             # close with a next-open fill, not on a still-forming bar.
             bars_by_symbol = await self.alpaca.get_bars_multi(
-                request, "1Day", limit=200, completed_only=True
+                universe, "1Day", limit=200, completed_only=True
             )
         except Exception as e:
             logger.error("bars_multi_error", error=str(e))
             bars_by_symbol = {}
-        regime_bars = bars_by_symbol.get(REGIME_SYMBOL)
-        if REGIME_SYMBOL not in universe:
-            bars_by_symbol.pop(REGIME_SYMBOL, None)
-        entries_allowed = await self._update_regime(regime_bars)
         for symbol, bars in bars_by_symbol.items():
             try:
                 if not bars.empty:
@@ -555,13 +553,27 @@ class StockPilot:
             )
 
         trades_executed = 0
-        regime_skipped = 0
+        window_skipped = 0
+        now_ny = datetime.now(ZoneInfo("America/New_York"))
+        session_day = now_ny.date().isoformat()
+        self._entry_attempts = {k: v for k, v in self._entry_attempts.items() if v == session_day}
+        minutes_open = now_ny - now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        in_entry_window = self.entry_window_minutes <= 0 or (
+            0 <= minutes_open.total_seconds() / 60 < self.entry_window_minutes
+        )
         for sig in all_signals:
             if sig.score < self.config.strategy.min_signal_score:
                 continue
-            if sig.action.value == "BUY" and not entries_allowed:
-                regime_skipped += 1
-                continue
+            if sig.action.value == "BUY":
+                if not in_entry_window:
+                    window_skipped += 1
+                    continue
+                if self._entry_attempts.get(sig.symbol) == session_day:
+                    continue
+                self._entry_attempts[sig.symbol] = session_day
+                stop = self._initial_stop(tech_data.get(sig.symbol, {}))
+                if stop:
+                    sig = sig.model_copy(update={"stop_loss_price": stop})
 
             current_price = tech_data.get(sig.symbol, {}).get("price")
             if sig.action.value == "SELL":
@@ -614,8 +626,8 @@ class StockPilot:
 
         if trades_executed:
             logger.info("trades_executed", count=trades_executed)
-        if regime_skipped:
-            logger.info("entries_blocked_regime", signals=regime_skipped)
+        if window_skipped:
+            logger.info("entries_outside_window", signals=window_skipped)
 
         # Hourly heartbeat (fires in any state via the shared helper)
         top = all_signals[0] if all_signals else None
@@ -624,8 +636,7 @@ class StockPilot:
             float(account.get("equity", 0)),
             len(positions),
             f"Signale {len(all_signals)} (Top: {top_str}, Schwelle "
-            f"{self.config.strategy.min_signal_score})"
-            + ("" if entries_allowed else " | Käufe pausiert (Regime)"),
+            f"{self.config.strategy.min_signal_score})",
         )
 
         # 12. (Daily summary now fires on the market open->closed transition —
@@ -637,31 +648,17 @@ class StockPilot:
         # 14. Wait for next scan
         await asyncio.sleep(self.config.strategy.scan_interval_seconds)
 
-    async def _update_regime(self, spy_bars) -> bool:
-        """Return whether new entries are allowed; notify once on every change."""
-        if self.regime_sma <= 0:
-            return True
-        uptrend = market_uptrend(spy_bars, self.regime_sma)
-        # Unknown regime (missing SPY data) blocks entries: buying blind is
-        # the riskier failure. Exits and stops are unaffected either way.
-        allowed = uptrend is True
-        if allowed != self._entries_allowed:
-            self._entries_allowed = allowed
-            logger.info("regime_changed", entries_allowed=allowed, uptrend=uptrend)
-            if allowed:
-                msg = f"📈 Markt-Regime: SPY über SMA{self.regime_sma} — neue Käufe wieder aktiv."
-            elif uptrend is None:
-                msg = (
-                    "⚠️ Markt-Regime unbekannt (keine SPY-Daten) — neue Käufe pausiert. "
-                    "Offene Positionen und Stops laufen weiter."
-                )
-            else:
-                msg = (
-                    f"📉 Markt-Regime: SPY unter SMA{self.regime_sma} — keine neuen Käufe. "
-                    "Offene Positionen und Stops laufen weiter."
-                )
-            await self.telegram.send(msg)
-        return allowed
+    def _initial_stop(self, td: dict) -> float | None:
+        """One initial stop rule for every strategy, as in the backtest.
+
+        Mean reversion (2.5x), whale (3x) and Claude used their own distances,
+        which the backtest never tested and which risk sizing then inherited.
+        """
+        price, atr = td.get("price"), td.get("ATR")
+        if not price or not atr or price <= 0 or atr <= 0:
+            return None
+        stop = round(price - self.initial_stop_factor * atr, 2)
+        return stop if stop > 0 else None
 
     def _is_near_close(self, clock: dict) -> bool:
         next_close = clock.get("next_close", "")

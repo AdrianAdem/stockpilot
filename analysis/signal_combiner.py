@@ -13,28 +13,32 @@ class SignalCombiner:
     """Merges per-strategy signals into one score and adds the LLM verdict.
 
     Strategy scores are averaged by strategy weight. Candidates that could still
-    clear the entry gate are sent to Claude; its confidence contributes
-    `weight_claude` of the final score. Symbols with conflicting BUY/SELL
-    signals are dropped.
+    clear the entry gate are sent to Claude, which can only veto: a contrary
+    action drops the signal, everything else keeps the strategy score. Symbols
+    with conflicting BUY/SELL signals are dropped.
     """
 
     def __init__(
         self,
         strategies: list[Strategy],
         claude: ClaudeAnalyst,
-        weight_claude: float = 0.20,
         min_score: float = 0.65,
         max_claude_calls: int = 12,
     ):
         self.strategies = strategies
         self.claude = claude
-        self.weight_claude = weight_claude
         self.min_score = min_score
         # Hard cap on Claude (Haiku+Sonnet) calls per scan to bound token cost.
         self.max_claude_calls = max_claude_calls
 
     async def generate_combined_signals(
-        self, universe: list[str], tech_data: dict, news=None, fred=None, portfolio=None, db=None
+        self,
+        universe: list[str],
+        tech_data: dict,
+        news=None,
+        fred=None,
+        portfolio=None,
+        db=None,
     ) -> list[Signal]:
         # Gather signals from all strategies
         all_strategy_signals: dict[str, list[Signal]] = {}
@@ -84,12 +88,13 @@ class SignalCombiner:
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # Below this, Claude can't lift a signal over the gate — don't spend tokens.
-        claude_gate = max(0.45, (self.min_score - 0.2) / 0.8 - 0.02)
+        # Claude can only veto, so only setups that clear the entry threshold
+        # are worth a call.
+        claude_gate = self.min_score
         claude_calls = 0
 
         for strategy_score, symbol, signals, best_signal in scored:
-            if strategy_score > claude_gate and claude_calls < self.max_claude_calls:
+            if strategy_score >= claude_gate and claude_calls < self.max_claude_calls:
                 claude_calls += 1
                 td = tech_data.get(symbol, {})
                 whale_data = await db.get_whale_consensus(symbol) if db else {}
@@ -110,20 +115,20 @@ class SignalCombiner:
                         )
                         continue
 
-                    claude_contrib = claude_signal.score * self.weight_claude
-                    strategy_contrib = strategy_score * (1 - self.weight_claude)
-                    final_score = strategy_contrib + claude_contrib
-
+                    # Claude is a veto, not a score input. Blending its confidence
+                    # in made a confirmation able to *lower* a signal below the
+                    # threshold that a skip would pass, and let a weak setup in
+                    # on a confident answer the backtest never saw. Stops and
+                    # targets stay the strategy's own, which were backtested.
                     combined.append(
                         Signal(
                             symbol=symbol,
                             action=best_signal.action,
-                            score=round(final_score, 3),
+                            score=round(strategy_score, 3),
                             strategy=f"combined({strat_names}+claude)",
-                            target_price=claude_signal.target_price or best_signal.target_price,
-                            stop_loss_price=claude_signal.stop_loss_price
-                            or best_signal.stop_loss_price,
-                            timeframe=claude_signal.timeframe or best_signal.timeframe,
+                            target_price=best_signal.target_price,
+                            stop_loss_price=best_signal.stop_loss_price,
+                            timeframe=best_signal.timeframe,
                             reasoning=f"Strategies: {best_signal.reasoning} | Claude: {claude_signal.reasoning}",
                         )
                     )
@@ -150,7 +155,7 @@ class SignalCombiner:
                                 reasoning=best_signal.reasoning,
                             )
                         )
-            elif strategy_score > claude_gate:
+            elif strategy_score >= claude_gate:
                 # Above the gate but Claude budget spent this scan — still allow
                 # a strategy-only signal through, scored like the backtest.
                 strat_names = "+".join(sorted(s.strategy for s in signals))

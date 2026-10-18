@@ -77,7 +77,9 @@ def test_combiner_discards_every_claude_action_mismatch(strategy_action, claude_
 
 def stockpilot_for_signal(sig: Signal, positions: list[dict]) -> StockPilot:
     bot = object.__new__(StockPilot)
-    bot.regime_sma = 0  # regime gate is covered in test_signal_alignment
+    bot.entry_window_minutes = 0  # entry timing is covered in test_signal_alignment
+    bot._entry_attempts = {}
+    bot.initial_stop_factor = 2.0
     bot.config = SimpleNamespace(
         extra_watchlist=[],
         strategy=SimpleNamespace(min_signal_score=0.65, scan_interval_seconds=0),
@@ -341,7 +343,9 @@ def test_reconcile_returns_false_and_alerts_for_negative_position_quantity():
 
 def test_closed_short_uses_later_buy_fill_and_short_pnl_direction():
     bot = object.__new__(StockPilot)
-    bot.regime_sma = 0  # regime gate is covered in test_signal_alignment
+    bot.entry_window_minutes = 0  # entry timing is covered in test_signal_alignment
+    bot._entry_attempts = {}
+    bot.initial_stop_factor = 2.0
     short = SimpleNamespace(
         symbol="CARR",
         side=Side.SELL,
@@ -389,7 +393,9 @@ def test_closed_short_uses_later_buy_fill_and_short_pnl_direction():
 @pytest.mark.parametrize("partial_status", ["filled", "canceled", "expired"])
 def test_closed_long_aggregates_partial_and_final_exit_fills(partial_status):
     bot = object.__new__(StockPilot)
-    bot.regime_sma = 0  # regime gate is covered in test_signal_alignment
+    bot.entry_window_minutes = 0  # entry timing is covered in test_signal_alignment
+    bot._entry_attempts = {}
+    bot.initial_stop_factor = 2.0
     trade = SimpleNamespace(
         symbol="AAPL",
         side=Side.BUY,
@@ -528,7 +534,9 @@ def test_wait_for_fill_keeps_polling_after_cancel_until_terminal_status():
 
 def test_sync_closed_positions_accepts_aware_utc_trade_timestamp():
     bot = object.__new__(StockPilot)
-    bot.regime_sma = 0  # regime gate is covered in test_signal_alignment
+    bot.entry_window_minutes = 0  # entry timing is covered in test_signal_alignment
+    bot._entry_attempts = {}
+    bot.initial_stop_factor = 2.0
     trade = SimpleNamespace(
         symbol="AAPL",
         side=Side.BUY,
@@ -596,7 +604,9 @@ def test_time_stop_accepts_aware_utc_trade_timestamp():
 
 def test_shutdown_request_is_idempotent_and_cancels_active_cycle_once():
     bot = object.__new__(StockPilot)
-    bot.regime_sma = 0  # regime gate is covered in test_signal_alignment
+    bot.entry_window_minutes = 0  # entry timing is covered in test_signal_alignment
+    bot._entry_attempts = {}
+    bot.initial_stop_factor = 2.0
     bot.running = True
     bot._trading_task = Mock()
     bot._trading_task.done.return_value = False
