@@ -100,7 +100,18 @@ class ClaudeAnalyst:
             except Exception:
                 pass
 
+    def _paused(self) -> bool:
+        """True while calls are suspended after a billing error.
+
+        Checked by every method that reaches the API, not only by
+        analyze_for_signal: the time-stop review calls quick_screen directly
+        and kept hitting an empty balance during the pause.
+        """
+        return bool(self._paused_until and datetime.now(UTC) < self._paused_until)
+
     async def quick_screen(self, symbol: str, tech_data: dict) -> dict | None:
+        if self._paused():
+            return None
         prompt = f"""Stock: {symbol}
 Price: ${tech_data.get("price", "?")}
 RSI: {tech_data.get("RSI", "?")}
@@ -146,6 +157,8 @@ BB Position: {tech_data.get("BB_position", "?")}"""
         macro_data: dict,
         portfolio_context: str = "",
     ) -> ClaudeAnalysis | None:
+        if self._paused():
+            return None
         # Per-symbol data in the user turn — the static SONNET_SYSTEM stays cached.
         user_content = f"""Stock: {symbol}
 Current Price: ${tech_data.get("price", "?")}
@@ -244,7 +257,7 @@ Analyze this stock and provide your recommendation."""
         macro_data: dict,
         portfolio_context: str = "",
     ) -> Signal | None:
-        if self._paused_until and datetime.now(UTC) < self._paused_until:
+        if self._paused():
             return None  # stays unhealthy -> signals are labelled CLAUDE OFFLINE
 
         key = (symbol, datetime.now(ZoneInfo("America/New_York")).date().isoformat())
