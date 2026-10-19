@@ -16,17 +16,29 @@ class OrderManager:
         self.db = db
         self._order_timestamps: dict[str, datetime] = {}
 
+    @staticmethod
+    def is_entry(order: dict) -> bool:
+        """Only standalone long entries may expire; never touch protective legs."""
+        return (
+            order.get("side") == "buy"
+            and order.get("type") in {"market", "limit"}
+            and order.get("order_class", "simple") in {"simple", ""}
+            and not order.get("legs")
+        )
+
     async def sync_orders(self):
         try:
             orders = await self.alpaca.get_orders(status="open")
             now = datetime.utcnow()
 
             for order in orders:
+                if not self.is_entry(order):
+                    continue
                 order_id = order.get("id", "")
                 order.get("created_at", "")
                 symbol = order.get("symbol", "")
-                filled_qty = int(order.get("filled_qty", 0))
-                total_qty = int(order.get("qty", 0))
+                filled_qty = float(order.get("filled_qty", 0))
+                total_qty = float(order.get("qty", 0))
 
                 if order_id not in self._order_timestamps:
                     self._order_timestamps[order_id] = now
@@ -65,6 +77,20 @@ class OrderManager:
 
         except Exception as e:
             logger.error("order_sync_error", error=str(e))
+
+    async def cancel_entries(self) -> bool:
+        """Stop new exposure without removing broker-held exit protection."""
+        for order in await self.alpaca.get_orders(status="open"):
+            if self.is_entry(order):
+                try:
+                    await self.alpaca.cancel_order(order["id"])
+                    self._order_timestamps.pop(order["id"], None)
+                except Exception as e:
+                    logger.error("entry_cancel_failed", order_id=order["id"], error=str(e))
+        remaining = await self.alpaca.get_orders(status="open")
+        confirmed = not any(self.is_entry(order) for order in remaining)
+        logger.info("entry_cancellation_checked", confirmed=confirmed)
+        return confirmed
 
     async def cancel_all(self):
         try:

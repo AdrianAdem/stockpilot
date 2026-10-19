@@ -2,7 +2,8 @@ import asyncio
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -47,6 +48,16 @@ class StockPilot:
     def __init__(self):
         self.config = load_config()
         self.running = True
+        self._shutdown_started = False
+        self._trading_task: asyncio.Task | None = None
+        self._shutdown_event = asyncio.Event()
+        # The backtest fills each signal once, at the next open. Entries are
+        # therefore limited to the first minutes of the session (0 = no limit)
+        # and to one attempt per symbol per day — otherwise an unchanged
+        # completed-bar signal re-buys a name right after it was stopped out.
+        self.entry_window_minutes = int(os.getenv("ENTRY_WINDOW_MINUTES", "60"))
+        self._entry_attempts: dict[str, str] = {}
+        self.initial_stop_factor = float(os.getenv("ATR_INITIAL_STOP_FACTOR", "2.0"))
 
     async def start(self):
         logger.info("stockpilot_starting")
@@ -54,6 +65,7 @@ class StockPilot:
         # Initialize components
         self.db = Database()
         await self.db.connect()
+        await self._seed_entry_attempts()
 
         self.alpaca = AlpacaClient(self.config.alpaca)
         account = await self.alpaca.verify_paper_account()
@@ -95,6 +107,7 @@ class StockPilot:
 
         # Trader
         self.trader = Trader(self.alpaca, self.db, self.portfolio_manager)
+        self._orders_settled = await self.trader.reconcile_pending_orders()
 
         # Strategies
         strategies = [
@@ -109,7 +122,6 @@ class StockPilot:
         self.combiner = SignalCombiner(
             strategies,
             self.claude,
-            weight_claude=self.config.strategy.claude_weight,
             min_score=self.config.strategy.min_signal_score,
             max_claude_calls=int(os.getenv("MAX_CLAUDE_CALLS_PER_SCAN", "12")),
         )
@@ -128,6 +140,7 @@ class StockPilot:
         # (covers names whose stop was kept but no longer exists at the broker).
         try:
             open_positions = await self.alpaca.get_positions()
+            await self.sync_entry_fills()
             # Clean up any ghost DB trades (closed at broker while bot was down)
             # silently — one summary instead of a burst of Telegram pings.
             before = len(await self.db.get_open_trades())
@@ -138,8 +151,13 @@ class StockPilot:
                     f"\U0001f9f9 Startup-Sync: {before - after} verwaiste Trades "
                     f"geschlossen (bei Alpaca längst verkauft). DB jetzt konsistent."
                 )
-            await self.stop_manager.migrate_stops_to_atr(open_positions)
-            await self.stop_manager.reconcile_stops(open_positions)
+            if self._orders_settled:
+                await self.stop_manager.migrate_stops_to_atr(open_positions)
+                await self.stop_manager.reconcile_stops(open_positions)
+            else:
+                await self.telegram.send(
+                    "⚠️ Ungeklärte Order-Ausführung. Trading blockiert; Broker prüfen."
+                )
         except Exception as e:
             logger.error("stop_migration_error", error=str(e))
 
@@ -155,7 +173,7 @@ class StockPilot:
         # Setup graceful shutdown
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+            loop.add_signal_handler(sig, self.request_shutdown)
 
         # Background tasks: Dashboard + Telegram polling
         from dashboard.app import start_dashboard
@@ -164,13 +182,67 @@ class StockPilot:
         asyncio.create_task(self.telegram.start_polling())
         logger.info("background_tasks_started", dashboard="http://0.0.0.0:8000")
 
-        while self.running:
+        try:
+            while self.running:
+                self._trading_task = asyncio.create_task(self._trading_loop())
+                try:
+                    await self._trading_task
+                except asyncio.CancelledError:
+                    if self.running:
+                        raise
+                except Exception as e:
+                    logger.error("main_loop_error", error=str(e), exc_info=True)
+                    await self.telegram.send_error(str(e))
+                    try:
+                        await asyncio.wait_for(self._shutdown_event.wait(), timeout=60)
+                    except TimeoutError:
+                        pass
+                finally:
+                    self._trading_task = None
+        finally:
+            await self.shutdown()
+
+    def request_shutdown(self):
+        """Signal-safe request; actual resource cleanup runs once in `run`."""
+        if not self.running:
+            return
+        logger.info("shutdown_requested")
+        self.running = False
+        self._shutdown_event.set()
+        if self._trading_task and not self._trading_task.done():
+            self._trading_task.cancel()
+
+    async def sync_entry_fills(self):
+        """Replace legacy estimated entry values only with the exact broker fill."""
+        for trade in await self.db.get_open_trades():
             try:
-                await self._trading_loop()
-            except Exception as e:
-                logger.error("main_loop_error", error=str(e), exc_info=True)
-                await self.telegram.send_error(str(e))
-                await asyncio.sleep(60)
+                order = await self.alpaca.get_order(trade.order_id)
+                if (
+                    order.get("id") != trade.order_id
+                    or order.get("symbol") != trade.symbol
+                    or order.get("side") != trade.side.value.lower()
+                    or order.get("status") not in {"filled", "canceled", "expired"}
+                ):
+                    continue
+                qty = float(order.get("filled_qty") or 0)
+                price = float(order.get("filled_avg_price") or 0)
+                if qty <= 0 or not qty.is_integer() or price <= 0 or not order.get("filled_at"):
+                    continue
+                timestamp = datetime.fromisoformat(order["filled_at"].replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    continue
+                await self.db.update_entry_fill(trade.order_id, int(qty), price, timestamp)
+                logger.info(
+                    "entry_fill_reconciled",
+                    symbol=trade.symbol,
+                    previous_price=trade.price,
+                    broker_price=price,
+                    qty=int(qty),
+                )
+            except Exception as exc:
+                logger.error(
+                    "entry_fill_reconciliation_failed", symbol=trade.symbol, error=str(exc)
+                )
 
     async def sync_closed_positions(self, positions: list[dict], notify: bool = True):
         """Reconcile DB open trades against real Alpaca positions. Any DB trade
@@ -182,27 +254,70 @@ class StockPilot:
         if not gone:
             return
 
-        # Map symbol -> most recent filled sell price from closed orders
-        exit_px: dict[str, float] = {}
+        closed_orders: list[dict] = []
         try:
-            closed = await self.alpaca.get_orders(status="closed")
-            for o in closed:
-                if (
-                    o.get("side") == "sell"
-                    and o.get("status") == "filled"
-                    and o.get("filled_avg_price")
-                ):
-                    sym = o.get("symbol")
-                    if sym not in exit_px:  # closed orders come newest-first
-                        exit_px[sym] = float(o["filled_avg_price"])
+            closed_orders = await self.alpaca.get_orders(status="closed")
         except Exception as e:
             logger.warning("sync_closed_orders_error", error=str(e))
 
         for t in gone:
-            price = exit_px.get(t.symbol) or t.price  # fallback: entry (pnl 0)
-            pnl = (price - t.price) * t.qty
-            pnl_pct = (price - t.price) / t.price * 100 if t.price else 0
-            days = (datetime.utcnow() - t.timestamp).days
+            exit_side = "sell" if t.side.value == "BUY" else "buy"
+            entry_time = t.timestamp
+            if entry_time.tzinfo is None:
+                entry_time = entry_time.replace(tzinfo=UTC)
+            else:
+                entry_time = entry_time.astimezone(UTC)
+            candidates = []
+            for order in closed_orders:
+                # Canceled partially filled orders still contributed real shares.
+                filled_at = order.get("filled_at") or order.get("updated_at")
+                if not filled_at:
+                    continue
+                try:
+                    fill_time = datetime.fromisoformat(filled_at.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if (
+                    order.get("symbol") == t.symbol
+                    and order.get("side") == exit_side
+                    and order.get("status") in {"filled", "canceled", "expired"}
+                    and float(order.get("filled_qty") or 0) > 0
+                    and order.get("filled_avg_price")
+                    and fill_time >= entry_time
+                ):
+                    candidates.append((fill_time, order))
+            if not candidates:
+                logger.error("exit_fill_unresolved", symbol=t.symbol, entry_order_id=t.order_id)
+                continue
+            remaining_qty = t.qty
+            exit_value = 0.0
+            exit_qty = 0
+            for _, order in sorted(candidates, key=lambda item: item[0]):
+                filled_qty = int(float(order.get("filled_qty") or 0))
+                used_qty = min(filled_qty, remaining_qty)
+                if used_qty <= 0:
+                    continue
+                exit_value += used_qty * float(order["filled_avg_price"])
+                exit_qty += used_qty
+                remaining_qty -= used_qty
+                if remaining_qty == 0:
+                    break
+            if remaining_qty > 0 or exit_qty == 0:
+                logger.error(
+                    "exit_fill_quantity_unresolved",
+                    symbol=t.symbol,
+                    expected=t.qty,
+                    matched=exit_qty,
+                )
+                continue
+            price = exit_value / exit_qty
+            direction = 1 if t.side.value == "BUY" else -1
+            pnl = (price - t.price) * t.qty * direction
+            pnl_pct = ((price - t.price) / t.price * 100 * direction) if t.price else 0
+            timestamp = t.timestamp
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=UTC)
+            days = (datetime.now(UTC) - timestamp).days
             await self.db.close_trade(t.order_id, price, pnl)
             logger.info(
                 "position_closed_synced",
@@ -280,6 +395,17 @@ class StockPilot:
             )
 
     async def _trading_loop(self):
+        if not await self.trader.reconcile_pending_orders():
+            logger.error("trading_blocked_pending_order_outcome")
+            account = await self.alpaca.get_account()
+            positions = await self.alpaca.get_positions()
+            await self._maybe_heartbeat(
+                float(account.get("equity", 0)),
+                len(positions),
+                "ORDER-STATUS UNGEKLÄRT – BROKER PRÜFEN",
+            )
+            await asyncio.sleep(30)
+            return
         clock = await self.alpaca.get_market_clock()
 
         if not clock.get("is_open"):
@@ -338,15 +464,31 @@ class StockPilot:
         # 2. Update trailing stops, take-profit, then reconcile stop coverage
         await self.stop_manager.update_trailing_stops(positions)
         await self.stop_manager.handle_take_profit(positions)
+        if not await self.trader.reconcile_pending_orders():
+            logger.error("cycle_blocked_unresolved_take_profit")
+            await asyncio.sleep(30)
+            return
         # Refresh positions (partial TP may have changed qty) then reconcile
         positions = await self.alpaca.get_positions()
-        await self.stop_manager.reconcile_stops(positions)
 
         # 3. Time stops
         await self.stop_manager.evaluate_time_stops(positions, self.claude)
+        if not await self.trader.reconcile_pending_orders():
+            logger.error("cycle_blocked_unresolved_time_stop")
+            await asyncio.sleep(30)
+            return
 
         # 4. Sync orders
         await self.order_manager.sync_orders()
+
+        # Exit fills can change quantities. Check coverage after all order work,
+        # not before a task that could invalidate that coverage.
+        positions = await self.alpaca.get_positions()
+        if not await self.stop_manager.reconcile_stops(positions):
+            logger.error("entries_blocked_unverified_stop_coverage")
+            await self._maybe_heartbeat(equity, len(positions), "STOP-SCHUTZ NICHT BESTÄTIGT")
+            await asyncio.sleep(self.config.strategy.scan_interval_seconds)
+            return
 
         # 5. Can we trade?
         if not await self.portfolio_manager.can_trade(account, positions):
@@ -362,7 +504,11 @@ class StockPilot:
         # 7. Calculate technicals — one multi-symbol fetch instead of N calls
         tech_data = {}
         try:
-            bars_by_symbol = await self.alpaca.get_bars_multi(universe, "1Day", limit=200)
+            # Completed sessions only: signals were validated on the prior
+            # close with a next-open fill, not on a still-forming bar.
+            bars_by_symbol = await self.alpaca.get_bars_multi(
+                universe, "1Day", limit=200, completed_only=True
+            )
         except Exception as e:
             logger.error("bars_multi_error", error=str(e))
             bars_by_symbol = {}
@@ -408,23 +554,58 @@ class StockPilot:
             )
 
         trades_executed = 0
+        window_skipped = 0
+        now_ny = datetime.now(ZoneInfo("America/New_York"))
+        session_day = now_ny.date().isoformat()
+        self._entry_attempts = {k: v for k, v in self._entry_attempts.items() if v == session_day}
+        minutes_open = now_ny - now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        in_entry_window = self.entry_window_minutes <= 0 or (
+            0 <= minutes_open.total_seconds() / 60 < self.entry_window_minutes
+        )
         for sig in all_signals:
             if sig.score < self.config.strategy.min_signal_score:
                 continue
+            if sig.action.value == "BUY":
+                if not in_entry_window:
+                    window_skipped += 1
+                    continue
+                if self._entry_attempts.get(sig.symbol) == session_day:
+                    continue
+                self._entry_attempts[sig.symbol] = session_day
+                stop = self._initial_stop(tech_data.get(sig.symbol, {}))
+                if not stop:
+                    logger.warning("order_blocked", symbol=sig.symbol, reason="no_atr_stop")
+                    continue
+                sig = sig.model_copy(update={"stop_loss_price": stop})
 
             current_price = tech_data.get(sig.symbol, {}).get("price")
-            size = self.position_sizer.calculate(
-                signal=sig,
-                account=account,
-                existing_positions=positions,
-                current_price=current_price,
-            )
-            if not size:
-                continue
+            if sig.action.value == "SELL":
+                held = next(
+                    (
+                        p
+                        for p in positions
+                        if p.get("symbol") == sig.symbol and float(p.get("qty", 0)) > 0
+                    ),
+                    None,
+                )
+                if not held:
+                    logger.warning("order_blocked", symbol=sig.symbol, reason="sell_without_long")
+                    continue
+                shares = int(float(held["qty"]))
+            else:
+                size = self.position_sizer.calculate(
+                    signal=sig,
+                    account=account,
+                    existing_positions=positions,
+                    current_price=current_price,
+                )
+                if not size:
+                    continue
+                shares = size.shares
 
             trade = await self.trader.execute(
                 signal=sig,
-                qty=size.shares,
+                qty=shares,
                 account=account,
                 positions=positions,
                 current_price=current_price,
@@ -433,12 +614,23 @@ class StockPilot:
                 await self.telegram.send_trade(trade, sig)
                 trades_executed += 1
 
-                # Refresh positions after trade
-                positions = await self.alpaca.get_positions()
-                account = await self.alpaca.get_account()
+            if not await self.trader.reconcile_pending_orders():
+                logger.error("cycle_blocked_unresolved_execution", symbol=sig.symbol)
+                await asyncio.sleep(30)
+                return
+
+            # A failed response can hide a filled entry: inspect even on None.
+            positions = await self.alpaca.get_positions()
+            account = await self.alpaca.get_account()
+            await self.sync_closed_positions(positions, notify=True)
+            if not await self.stop_manager.reconcile_stops(positions):
+                logger.error("entries_blocked_unverified_stop_coverage")
+                break
 
         if trades_executed:
             logger.info("trades_executed", count=trades_executed)
+        if window_skipped:
+            logger.info("entries_outside_window", signals=window_skipped)
 
         # Hourly heartbeat (fires in any state via the shared helper)
         top = all_signals[0] if all_signals else None
@@ -459,6 +651,36 @@ class StockPilot:
         # 14. Wait for next scan
         await asyncio.sleep(self.config.strategy.scan_interval_seconds)
 
+    async def _seed_entry_attempts(self) -> None:
+        """Rebuild today's entry attempts from recorded fills after a restart.
+
+        Kept only in memory, a restart between a stop-out and the next scan
+        would let the unchanged signal buy the same name again.
+        """
+        now_ny = datetime.now(ZoneInfo("America/New_York"))
+        midnight = now_ny.replace(hour=0, minute=0, second=0, microsecond=0)
+        day = now_ny.date().isoformat()
+        for trade in await self.db.get_recent_trades(days=1):
+            ts = trade.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)  # legacy rows were stored as naive UTC
+            if trade.side.value == "BUY" and ts >= midnight:
+                self._entry_attempts[trade.symbol] = day
+        if self._entry_attempts:
+            logger.info("entry_attempts_restored", symbols=sorted(self._entry_attempts))
+
+    def _initial_stop(self, td: dict) -> float | None:
+        """One initial stop rule for every strategy, as in the backtest.
+
+        Mean reversion (2.5x), whale (3x) and Claude used their own distances,
+        which the backtest never tested and which risk sizing then inherited.
+        """
+        price, atr = td.get("price"), td.get("ATR")
+        if not price or not atr or price <= 0 or atr <= 0:
+            return None
+        stop = round(price - self.initial_stop_factor * atr, 2)
+        return stop if stop > 0 else None
+
     def _is_near_close(self, clock: dict) -> bool:
         next_close = clock.get("next_close", "")
         if not next_close:
@@ -472,16 +694,75 @@ class StockPilot:
             return False
 
     async def shutdown(self):
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
         logger.info("shutting_down")
         self.running = False
 
-        # Cancel all open orders on shutdown
+        # Broker-held protection must survive a stopped/offline process.
+        entries_cancelled = False
         try:
-            await self.order_manager.cancel_all()
+            entries_cancelled = await self.order_manager.cancel_entries()
         except Exception as e:
             logger.error("shutdown_cancel_error", error=str(e))
 
-        await self.telegram.send("🛑 <b>StockPilot stopped</b>\nAll open orders cancelled.")
+        # A cancellation can arrive next to a broker fill. Re-read broker state
+        # before closing clients and restore any missing protective stop.
+        stops_safe = False
+        orders_settled = False
+        try:
+            for _ in range(3):
+                # Settle non-protective exits too; otherwise they may expire
+                # after shutdown with their protective stop already canceled.
+                open_orders = await self.alpaca.get_orders(status="open")
+                pending = [
+                    o
+                    for o in open_orders
+                    if o.get("type") in {"market", "limit"}
+                    and not o.get("legs")
+                    and o.get("order_class", "simple") in {"simple", ""}
+                ]
+                for order in pending:
+                    try:
+                        await self.alpaca.cancel_order(order["id"])
+                    except Exception as exc:
+                        logger.warning(
+                            "shutdown_order_cancel_failed", order_id=order["id"], error=str(exc)
+                        )
+                journal_settled = await self.trader.reconcile_pending_orders()
+                terminal = True
+                for order in pending:
+                    final = await self.alpaca.get_order(order["id"])
+                    terminal = terminal and final.get("status") in {
+                        "filled",
+                        "canceled",
+                        "expired",
+                        "rejected",
+                    }
+                if journal_settled and terminal:
+                    orders_settled = True
+                    break
+                await asyncio.sleep(0.5)
+            positions = await self.alpaca.get_positions()
+            await self.sync_closed_positions(positions, notify=False)
+            if orders_settled:
+                stops_safe = await self.stop_manager.reconcile_stops(positions)
+            logger.info("shutdown_stop_reconciliation", safe=stops_safe)
+        except Exception as e:
+            logger.error("shutdown_stop_reconciliation_failed", error=str(e), exc_info=True)
+
+        status = (
+            "Entry cancellations confirmed"
+            if entries_cancelled
+            else "WARNING: entry cancellations NOT confirmed"
+        )
+        protection = (
+            "Stop-Abdeckung bestätigt."
+            if stops_safe
+            else "⚠️ STOP-SCHUTZ NICHT BESTÄTIGT. Broker und offene Orders manuell prüfen."
+        )
+        await self.telegram.send(f"🛑 <b>StockPilot stopped</b>\n{status}\n{protection}")
 
         await self.alpaca.close()
         await self.sec.close()

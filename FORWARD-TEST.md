@@ -6,10 +6,57 @@ The point of writing them down first is that a bad week cannot move the goalpost
 afterwards.
 
 ## Current run
-**Run 4: 2026-08-24 → 2026-10-05** (6 weeks).
-First run with a verified-working stop mechanism and risk-based sizing.
+**Run 5: 2026-10-19 → 2026-11-30** (6 weeks).
+First run whose *entries* follow the backtested model: completed daily bars,
+one attempt per signal near the open, the plain strategy score against the 0.65
+threshold, and a `fill − 2×ATR` initial stop.
+
+Still live-only, with no backtest counterpart — keep these in mind when comparing:
+whale-following (weight 0.25 in the blend), the Claude veto, the 50% partial
+take-profit at a strategy target, and the 10-day time stop.
 
 ---
+
+## Run 4 results (2026-08-24 → 2026-10-05)
+
+30 trading days, 34 closed trades, equity $99,840 → $96,812.
+
+| # | Criterion | Target | Actual | |
+|---|-----------|--------|--------|---|
+| 1 | Sharpe ratio | > 0.8 | **−3.92** | ❌ |
+| 2 | Max drawdown | < 8% | **−3.99%** | ✅ |
+| 3 | Profit factor | > 1.3 | **0.32** | ❌ |
+| 4 | Closed trades | ≥ 30 | **34** | ✅ |
+| 5 | Uptime | no outage > 24h | two 2-day gaps (17–18 Sep, 28–29 Sep) | ❌ |
+| 6 | Stop coverage | 100% at all times | uncovered positions on 17 days, last 14 Sep | ❌ |
+
+**4 criteria failed → per the decision matrix: re-examine the assumptions.**
+
+### Diagnosis
+
+Win rate 32%, average win $103 vs average loss $156. Trades that ended within
+five days won **0%** of the time — entries were whipsawed out almost at once.
+
+The decisive check was out-of-sample: the unchanged backtest, run over the
+same six weeks, lost **−5.8% at Sharpe −8.2** — worse than live. SPY was flat
+(+0.1%). So the loss was not an implementation fault: the strategy has no edge
+in a sideways market, while in the preceding trending window (SPY +3.3%) the
+same backtest made +2.6% at Sharpe 1.8.
+
+Four live-vs-backtest deviations were found along the way and fixed for run 5
+(see changelog). They did not cause run 4's loss — the backtest lost more —
+but they meant live was trading a model the backtest never validated.
+
+The same investigation found defects in the backtest harnesses themselves
+(docs/BACKTESTS.md, section 5). Re-run cleanly, the strategy's backtested
+Sharpe is about **0.3** over 440 days, and the fill-order noise alone spans
+−0.5 to 1.0. **Criterion 1 (Sharpe > 0.8) is not met even in backtest.**
+Run 5 therefore mainly tests whether live now reproduces the backtest, not
+whether the strategy is profitable.
+
+Stop coverage failed on a bug in the protective-stop lifecycle, fixed on
+22 Sep; since then no position has been without a stop. Uptime failed because
+the bot runs on a laptop that sleeps.
 
 ## Run 3 results (2026-06-29 → 2026-08-21)
 
@@ -48,6 +95,21 @@ under its intended conditions.
 
 ## Changelog
 
+- **2026-10-18 — live signal path aligned with the backtest. Test restarted.**
+  (a) Signals use completed daily bars instead of the still-forming bar.
+  (b) One entry attempt per symbol per session, within 60 minutes of the open
+  (`ENTRY_WINDOW_MINUTES`). Previously an unchanged signal could re-buy a name
+  hours after its stop fired.
+  (c) Claude is a veto only. The ×0.9 haircut on unconfirmed signals (which
+  raised the effective threshold to ~0.72) and the confidence blend are gone.
+  (d) Initial stop `fill − 2×ATR` for every strategy; mean reversion, whale and
+  Claude previously set their own distances.
+  (e) Claude decisions are cached per symbol per day, and calls pause for six
+  hours after a billing error (2,333 failed calls during run 4).
+  A market-regime gate (SPY > SMA50) was implemented, then **removed before
+  going live**: the harness re-run showed it failing its own decision rule.
+- **2026-09-22 — protective-stop lifecycle fixed** (pending orders, broker fill
+  accounting, completed daily bars for ATR). Not a restart; mid-run fix.
 - **2026-08-23 — stop-coverage bug fixed, risk-based sizing added. Test restarted.**
   (a) Alpaca rejects a PATCH replace when the order is no longer replaceable
   (422/403); the failure was treated as fatal, so stops were neither updated nor
@@ -75,14 +137,16 @@ under its intended conditions.
 
 ## Honest expectation
 
-- Backtested B1 returns 7.4% over 419 days ≈ **+1.0% over six weeks**. Live will
-  likely be lower.
-- Any positive return at Sharpe > 0.8 is acceptable.
-- A win rate near 40% is normal for trend following. Low win rate alone is not a
-  failure, provided the average win exceeds the average loss.
-- **Risk-based sizing was adopted for lower tail risk, not higher return.** At
-  equal Sharpe it halved the worst single loss. If run 4 shows a smaller drawdown
-  and smaller individual losses, the change did its job — even at a similar return.
+- The corrected backtest makes about +2.7% over 440 days at Sharpe 0.3 —
+  roughly **+0.4% over six weeks**, inside the noise. A flat or slightly
+  negative run 5 is the expected outcome, not a malfunction.
+- The useful question for run 5: does live P&L now track the backtest over the
+  same weeks? Compare both at the end. A large gap points first to the four
+  live-only components listed above, then to implementation differences; a
+  small gap with a poor result means the strategy needs new ideas, not more
+  tuning.
+- Entries happen only in the first hour after the open. On days the machine is
+  asleep at the open, the bot will not buy — exits and stops are unaffected.
 
 ## Abort conditions (stop and analyse immediately)
 
@@ -98,7 +162,7 @@ under its intended conditions.
 - **Larger risk budgets** (0.5%, 0.75% per trade): indistinguishable from flat
   sizing, because the 5% per-position cap binds first.
 
-## Decision on 2026-10-05
+## Decision on 2026-11-30
 
 - **All 6 criteria met** → discuss the next phase
 - **1–2 failed** → root-cause analysis; do not blindly re-tune parameters; run another 6 weeks
@@ -113,7 +177,7 @@ from storage.db import Database
 async def t():
     db=Database(); await db.connect()
     cur=await db._db.execute('''SELECT COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END),
-        ROUND(SUM(pnl),2) FROM trades WHERE closed_at > '2026-08-24' AND pnl != 0''')
+        ROUND(SUM(pnl),2) FROM trades WHERE closed_at > '2026-10-19' AND pnl != 0''')
     n,w,pnl=await cur.fetchone()
     print(f'closed: {n} | wins: {w} | realised: \${pnl}')
     await db.close()

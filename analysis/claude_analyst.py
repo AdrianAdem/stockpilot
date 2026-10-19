@@ -1,4 +1,6 @@
 import json
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import anthropic
 import structlog
@@ -12,6 +14,10 @@ logger = structlog.get_logger()
 # 2-tier by design: cheap Haiku screen, Sonnet deep-dive only on candidates.
 HAIKU_MODEL = "claude-haiku-4-5"
 SONNET_MODEL = "claude-sonnet-4-6"
+
+# An empty credit balance will not fix itself within one scan; retrying every
+# 15 minutes only produced thousands of failed calls and log noise.
+BILLING_RETRY_AFTER = timedelta(hours=6)
 
 # Pricing per 1M tokens (input, output)
 PRICING = {
@@ -74,11 +80,20 @@ class ClaudeAnalyst:
         # Claude logically judging a stock not-tradeable.
         self.api_healthy = True
         self.last_error: str | None = None
+        self._failure_count = 0
+        self._paused_until: datetime | None = None
+        # Signals run on completed daily bars, so Claude sees identical inputs
+        # on every scan of a session. One decision per symbol per day.
+        self._decisions: dict[tuple[str, str], Signal | None] = {}
 
     async def _log_failure(self, model: str, error: str):
         """Mark Claude unhealthy and persist the failed call."""
         self.api_healthy = False
         self.last_error = error
+        self._failure_count += 1
+        if "credit balance" in error.lower():
+            self._paused_until = datetime.now(UTC) + BILLING_RETRY_AFTER
+            logger.error("claude_billing_exhausted", retry_at=self._paused_until.isoformat())
         if self.db:
             try:
                 await self.db.log_api_cost(model, 0, 0, 0.0, success=False, error=error[:300])
@@ -228,6 +243,32 @@ Analyze this stock and provide your recommendation."""
         news: list[dict],
         macro_data: dict,
         portfolio_context: str = "",
+    ) -> Signal | None:
+        if self._paused_until and datetime.now(UTC) < self._paused_until:
+            return None  # stays unhealthy -> signals are labelled CLAUDE OFFLINE
+
+        key = (symbol, datetime.now(ZoneInfo("America/New_York")).date().isoformat())
+        if key in self._decisions:
+            return self._decisions[key]
+
+        failures_before = self._failure_count
+        decision = await self._analyze(
+            symbol, tech_data, whale_data, news, macro_data, portfolio_context
+        )
+        # Only remember real answers; an API failure is retried next scan.
+        if self._failure_count == failures_before:
+            self._decisions = {k: v for k, v in self._decisions.items() if k[1] == key[1]}
+            self._decisions[key] = decision
+        return decision
+
+    async def _analyze(
+        self,
+        symbol: str,
+        tech_data: dict,
+        whale_data: dict,
+        news: list[dict],
+        macro_data: dict,
+        portfolio_context: str,
     ) -> Signal | None:
         # Tier 1: Quick screen
         screen = await self.quick_screen(symbol, tech_data)

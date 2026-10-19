@@ -34,13 +34,15 @@ StockPilot separates those concerns. Four independent signal sources are merged 
 
 ## Features
 
-- **Four signal sources, weighted** — momentum, mean reversion, 13F whale-following and an LLM analyst, merged into a single score with a configurable entry threshold.
-- **Two-tier LLM analysis** — Claude Haiku screens candidates cheaply; only survivors reach Claude Sonnet for full analysis (technicals + news + institutional flow + macro). A per-scan call budget caps token spend; the static system prompt is cached.
+- **Three weighted strategies plus an LLM veto** — momentum, mean reversion and 13F whale-following are merged into one score with a configurable entry threshold; the LLM analyst can reject a setup but never raises or lowers its score.
+- **Two-tier LLM analysis** — Claude Haiku screens candidates cheaply; only survivors reach Claude Sonnet for full analysis (technicals + news + institutional flow + macro). A per-scan call budget caps token spend, decisions are cached per symbol per day, and the static system prompt is cached.
 - **13F institutional tracking** — parses SEC EDGAR filings for 8 funds (Berkshire Hathaway, Bridgewater, Soros, Renaissance Technologies, Citadel, Pershing Square, Third Point, Appaloosa), diffs consecutive quarters and resolves issuer names to tradeable tickers to build a buy-consensus signal.
 - **Risk-based position sizing** — each trade is sized so that being stopped out costs the same fraction of equity (default 0.25%), so a wide-stop name gets a small position rather than the same weight as a tight-stop one. Bounded by a hard 5% per-position cap.
+- **Live entries mirror the backtest** — signals use completed daily bars; each signal gets one entry attempt in the first hour of the session (the backtest fills at the open); every initial stop is `fill − 2×ATR`, and entries without an ATR are skipped. Not yet in the backtest: whale-following, the Claude veto, the 50% partial take-profit and the 10-day time stop (see [FORWARD-TEST.md](FORWARD-TEST.md)).
 - **Hard risk layer** — per-position cap, max concurrent positions, GICS sector limits, minimum cash reserve, daily and weekly drawdown circuit breakers, and no averaging into an existing position.
-- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. Stops are submitted as broker-side GTC orders. Protection depends on those orders remaining accepted and open; graceful shutdown cancels open orders. Updates prefer an atomic order replace and fall back to cancel-and-recreate if the broker rejects it; a reconciliation pass — running inside and outside market hours — aims to reconcile each open position to one full-size stop; broker errors and the interval between passes can leave gaps.
-- **Backtesting** — no-lookahead engine (signal on day *i* fills at day *i+1* open; stops checked against intraday lows), plus standalone harnesses that isolate exit models and position-sizing models for controlled A/B comparison. See [Method](#method).
+- **ATR trailing exits** — initial stop at `entry − 2×ATR`, then a continuous trailing stop at `price − 2.5×ATR` that only ratchets upward. ATR uses completed daily bars. GTC stops remain at the broker while the bot is offline, subject to market hours and execution conditions. Rejected replacements preserve existing protection; reconciliation checks quantity and status and blocks new entries when coverage is unconfirmed.
+- **Long-only execution** — sell signals close existing long positions. Conflicting strategy and Claude actions are skipped. Execution records use broker fill prices and quantities; pending exits block competing sell orders.
+- **Backtesting** — standalone A/B harnesses that isolate one variable each (exit model, position sizing, regime gate): signal on day *i*'s completed bar, fill at day *i+1*'s open, stops checked against intraday lows with gap-downs filled at the open, same-day candidates filled by score. A simpler end-to-end engine (`backtest/engine.py`) fills at the signal close. See [Method](#method).
 - **Operations** — FastAPI dashboard, Telegram notifications and remote control, structured JSON logging, per-call API cost tracking.
 
 <br>
@@ -164,10 +166,12 @@ Tuning knobs (defaults shipped in `.env.example`):
 | `MAX_POSITION_PCT` / `MAX_POSITIONS` | `0.03` / `15` | Base position weight, max concurrent positions |
 | `MAX_SECTOR_PCT` / `MAX_PORTFOLIO_INVESTED` | `0.40` / `0.80` | Sector cap, minimum cash reserve |
 | `DAILY_DRAWDOWN_LIMIT` / `WEEKLY_DRAWDOWN_LIMIT` | `0.02` / `0.05` | Circuit breakers |
+| `RISK_PER_TRADE` | `0.0025` | Equity fraction lost if a position hits its initial stop |
+| `ENTRY_WINDOW_MINUTES` | `60` | New entries only this long after the open (`0` = any time) |
 | `ATR_INITIAL_STOP_FACTOR` / `ATR_TRAILING_FACTOR` | `2.0` / `2.5` | Stop distance in ATR multiples |
 | `SCREENER_MIN_VOLUME` / `SCREENER_MIN_PRICE` | `200000` / `5` | Liquidity filter (volume measured on the IEX feed) |
 | `MAX_CLAUDE_CALLS_PER_SCAN` | `12` | Token-cost ceiling per scan |
-| `MOMENTUM_WEIGHT` / `MEAN_REVERSION_WEIGHT` / `WHALE_FOLLOW_WEIGHT` / `CLAUDE_WEIGHT` | `0.30` / `0.25` / `0.25` / `0.20` | Signal blend |
+| `MOMENTUM_WEIGHT` / `MEAN_REVERSION_WEIGHT` / `WHALE_FOLLOW_WEIGHT` | `0.30` / `0.25` / `0.25` | Strategy blend (Claude can veto, not score) |
 
 <br>
 
@@ -196,6 +200,10 @@ python -m backtest.exit_compare
 # Position sizing: flat percentage vs risk-based, cooldown, portfolio stop
 python -m backtest.risk_sizing_compare
 
+# Market-regime gate (rejected): none vs SPY>SMA200 vs SPY>SMA50 vs breadth,
+# with paired robustness over random same-day fill orders
+python -m backtest.regime_compare
+
 # Position sizing: flat vs volatility-scaled (earlier experiment)
 python -m backtest.sizing_compare
 ```
@@ -208,7 +216,7 @@ Telegram control: `/status`, `/positions`, `/history`, `/pause`, `/resume`, `/ki
 
 Parameters are chosen by controlled backtest, not intuition. Each experiment
 freezes everything except the variable under test, and the trade count is
-reported so an unchanged entry set is verifiable. Two examples:
+reported so an unchanged entry set is verifiable. Three examples:
 
 **Exit model** — the original two-stage trailing stop returned more on paper
 but carried an −83.7% drawdown. Continuous ATR trailing at N=2.5 more than
@@ -219,6 +227,13 @@ same portfolio weight as a quiet one, so it risked 3–4× more per trade. Sizin
 by stop distance left the Sharpe ratio unchanged but halved the worst single
 trade (−$506 → −$267). It shipped for the risk reduction, not for return.
 
+**Auditing the method itself** — a review of the harnesses found a one-session
+signal lag and showed that results depended on the arbitrary order in which
+same-day candidates filled: the same model on the same data ranged from Sharpe
+−0.48 to 1.04. After the fix, a market-regime gate that had looked like a clear
+win (0.49 → 0.76) failed its pre-registered test and was taken back out. The
+honest headline from that work: the strategy's measured edge is within noise.
+
 Rejected changes are documented too, including a portfolio-level stop that
 looked appealing and tested at −0.49 Sharpe.
 
@@ -228,8 +243,8 @@ Full results, including the reasoning and the rejected variants:
 Backtests only decide whether a change ships. Whether the strategy actually
 works is a separate question, answered by forward testing on unseen data —
 tracked in [FORWARD-TEST.md](FORWARD-TEST.md) against pass/fail criteria that
-were fixed before data collection began. The most recent completed run failed
-3 of 6 criteria; that is recorded there rather than quietly dropped.
+were fixed before data collection began. The two most recent completed runs
+failed 3 and 4 of 6 criteria; both are recorded there rather than quietly dropped.
 
 <br>
 
@@ -237,8 +252,11 @@ were fixed before data collection began. The most recent completed run failed
 
 - **Paper lock (current phase):** `AlpacaClient` raises on construction if `ALPACA_BASE_URL` is not the paper endpoint, and `verify_paper_account()` runs at startup. Removing this guard is a conscious one-line decision, which is exactly the point — live trading should never be reachable by a stray config value.
 - Drawdown breakers halt new entries for the day (−2%) and pause the bot entirely for the week (−5%).
-- The system submits broker-side GTC stops and reconciles coverage each cycle. This is not a continuous coverage guarantee: partial fills, manual changes and broker errors require reconciliation.
-- Graceful shutdown cancels all open orders on `SIGINT`/`SIGTERM`.
+- Reconciliation verifies broker-side GTC stop quantity and status. Unconfirmed coverage blocks new entries and raises an alert. This is a point-in-time check, not a guarantee against gaps or broker outages.
+- Entry timeouts exclude protective stops. Graceful shutdown settles standalone entry/exit remainders, preserves protective stops and checks remaining position coverage on `SIGINT`/`SIGTERM`. Unconfirmed protection raises an explicit alert.
+- Uncertain entry/exit submissions are journaled in SQLite. Unresolved outcomes block further execution, including after a restart. An `unknown:` journal entry requires a broker-side investigation; do not delete it merely to resume trading.
+- Exit accounting includes terminal partial fills and paginated order history. Startup corrects still-open legacy entry records using their exact broker order IDs; this does not retroactively audit every closed historical trade.
+- Stop replacements are checked at the broker before local updates. Failed replacements preserve existing protection instead of canceling it; ambiguous POST/PATCH failures are not blindly retried.
 - `.env`, logs and the SQLite database are gitignored; no credentials are committed.
 
 <br>

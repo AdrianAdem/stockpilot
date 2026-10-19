@@ -89,7 +89,9 @@ async def build_candidates(symbols, bars):
             continue
         tech = {}
         for s, df in bars.items():
-            mask = df.index <= pd.Timestamp(date, tz="UTC")
+            # Daily bars are stamped at New York midnight (04:00/05:00Z). Comparing
+            # against UTC midnight dropped day d's own bar, so signals lagged a session.
+            mask = df.index <= pd.Timestamp(date, tz="America/New_York")
             hist = df[mask].tail(LOOKBACK)
             if len(hist) >= 50:
                 tech[s] = ta.calculate_all(hist)
@@ -116,6 +118,11 @@ async def build_candidates(symbols, bars):
                     cands_by_date[date].append(
                         {"sym": sym, "score": score, "atr": atr, "rel_vol": atr / price}
                     )
+        # Fill order decides which candidates get the scarce slots and cash.
+        # Unsorted, it followed the API response order, which varies between
+        # requests: the same model on the same data ranged from Sharpe 0.24 to
+        # 0.50. Live trades the strongest signals first, so the backtest does too.
+        cands_by_date[date].sort(key=lambda c: (-c["score"], c["sym"]))
     return dates, arr, cands_by_date
 
 
@@ -185,7 +192,8 @@ def simulate(model, dates, arr, cands_by_date, median_rv):
             low, close = float(b["low"]), float(b["close"])
             atr_now = float(b["atr_14"]) if not pd.isna(b["atr_14"]) else p["atr"]
             if low <= p["stop"]:
-                exit_px = p["stop"] * (1 - SLIPPAGE)
+                # A gap below the stop fills at the open, not at the stop price.
+                exit_px = min(float(b["open"]), p["stop"]) * (1 - SLIPPAGE)
                 cash += p["qty"] * exit_px
                 trades.append(
                     {

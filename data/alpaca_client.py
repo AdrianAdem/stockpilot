@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -55,15 +56,17 @@ class AlpacaClient:
             except httpx.HTTPStatusError as e:
                 logger.error("alpaca_http_error", status=e.response.status_code,
                              url=url, attempt=attempt + 1)
-                if attempt == MAX_RETRIES - 1:
+                if method in {"POST", "PATCH"} or attempt == MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(2 ** attempt)
             except httpx.RequestError as e:
                 logger.error("alpaca_request_error", error=str(e), attempt=attempt + 1)
-                if attempt == MAX_RETRIES - 1:
+                # A lost response may hide a successful order. Reconcile before
+                # another mutation instead of risking duplicate protection.
+                if method in {"POST", "PATCH"} or attempt == MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(2 ** attempt)
-        return {}
+        raise RuntimeError("Alpaca request exhausted retries without a response")
 
     async def get_account(self) -> dict:
         return await self._request("GET", f"{self.base_url}/v2/account")
@@ -101,6 +104,33 @@ class AlpacaClient:
         )
         return self._bars_to_df(data.get("bars", []))
 
+    async def get_completed_daily_bars(
+        self, symbol: str, limit: int = 30, as_of: datetime | None = None
+    ) -> pd.DataFrame:
+        """Return latest completed New York daily bars, oldest first."""
+        now = as_of or datetime.now(ZoneInfo("America/New_York"))
+        if now.tzinfo is None:
+            raise ValueError("as_of must be timezone-aware")
+        cutoff = now.astimezone(ZoneInfo("America/New_York")).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        data = await self._request(
+            "GET",
+            f"{self.data_url}/v2/stocks/{symbol}/bars",
+            params={
+                "timeframe": "1Day",
+                "limit": limit,
+                "feed": "iex",
+                "sort": "desc",
+                "start": (cutoff - timedelta(days=int(limit * 1.5) + 10)).isoformat(),
+                "end": (cutoff - timedelta(seconds=1)).isoformat(),
+            },
+        )
+        bars = self._bars_to_df(data.get("bars", []))
+        if bars.empty:
+            return bars
+        return bars.loc[bars.index < cutoff].tail(limit)
+
     def _bars_to_df(self, bars: list[dict]) -> pd.DataFrame:
         if not bars:
             return pd.DataFrame()
@@ -113,12 +143,28 @@ class AlpacaClient:
         return df.set_index("timestamp").sort_index()
 
     async def get_bars_multi(self, symbols: list[str], timeframe: str = "1Day",
-                             limit: int = 200) -> dict[str, pd.DataFrame]:
+                             limit: int = 200,
+                             completed_only: bool = False,
+                             as_of: datetime | None = None) -> dict[str, pd.DataFrame]:
         """Fetch bars for many symbols in batched multi-symbol requests.
 
         Collapses N per-symbol calls into ceil(N/200) calls — the real fix for
         the rate limit (200 req/min), since concurrency can't beat that ceiling.
+
+        With ``completed_only`` (daily bars only) today's still-forming bar is
+        excluded. Signals were backtested on completed bars with a next-open
+        fill; computing them on a partial bar fires on intraday noise instead.
         """
+        cutoff = None
+        if completed_only:
+            if timeframe != "1Day":
+                raise ValueError("completed_only is only defined for daily bars")
+            now = as_of or datetime.now(ZoneInfo("America/New_York"))
+            if now.tzinfo is None:
+                raise ValueError("as_of must be timezone-aware")
+            cutoff = now.astimezone(ZoneInfo("America/New_York")).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
         result: dict[str, pd.DataFrame] = {}
         # Multi-symbol endpoint caps the symbol list per request; chunk to stay safe.
         CHUNK = 100
@@ -133,6 +179,8 @@ class AlpacaClient:
                 "feed": "iex",
                 "start": self._default_start(timeframe, limit),
             }
+            if cutoff is not None:
+                params["end"] = (cutoff - timedelta(seconds=1)).isoformat()
             next_token = None
             while True:
                 if next_token:
@@ -150,6 +198,8 @@ class AlpacaClient:
                 next_token = data.get("next_page_token")
                 if not next_token:
                     break
+        if cutoff is not None:
+            result = {sym: df.loc[df.index < cutoff] for sym, df in result.items()}
         return result
 
     async def get_latest_quote(self, symbol: str) -> dict:
@@ -199,9 +249,35 @@ class AlpacaClient:
         return await self._request("POST", f"{self.base_url}/v2/orders", json=body)
 
     async def get_orders(self, status: str = "open") -> list[dict]:
-        return await self._request(
-            "GET", f"{self.base_url}/v2/orders", params={"status": status}
-        )
+        """Page by order ID so equal submission times cannot skip fills."""
+        params = {"status": status, "limit": 500, "direction": "desc"}
+        orders = []
+        seen = set()
+        for _ in range(100):
+            page = await self._request(
+                "GET", f"{self.base_url}/v2/orders", params=dict(params)
+            )
+            if not isinstance(page, list):
+                raise RuntimeError("Invalid Alpaca order list")
+            new_count = 0
+            for order in page:
+                order_id = order.get("id")
+                if not order_id:
+                    raise RuntimeError("Alpaca returned an order without an id")
+                if order_id in seen:
+                    continue
+                seen.add(order_id)
+                orders.append(order)
+                new_count += 1
+            if page and not new_count:
+                raise RuntimeError("Alpaca order pagination did not advance")
+            if len(page) < 500:
+                return orders
+            params["before_order_id"] = page[-1]["id"]
+        raise RuntimeError("Alpaca order history exceeded pagination safety bound")
+
+    async def get_order(self, order_id: str) -> dict:
+        return await self._request("GET", f"{self.base_url}/v2/orders/{order_id}")
 
     async def cancel_order(self, order_id: str) -> None:
         await self._request("DELETE", f"{self.base_url}/v2/orders/{order_id}")

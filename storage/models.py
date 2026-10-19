@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -25,7 +25,7 @@ class Signal(BaseModel):
     stop_loss_price: float | None = None
     timeframe: str | None = None
     reasoning: str = ""
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class TradeRecord(BaseModel):
@@ -39,7 +39,7 @@ class TradeRecord(BaseModel):
     signal_score: float
     stop_loss: float | None = None
     take_profit: float | None = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     closed_at: datetime | None = None
     close_price: float | None = None
     pnl: float | None = None
