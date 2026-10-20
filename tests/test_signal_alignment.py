@@ -329,3 +329,16 @@ class TestTraderStopGuards:
             assert db.log_trade.await_args.args[0].stop_loss == stop
 
         asyncio.run(check())
+
+
+def test_billing_pause_also_covers_direct_api_paths():
+    """The time-stop review calls quick_screen directly, not analyze_for_signal."""
+    from datetime import UTC, timedelta
+    from types import SimpleNamespace
+
+    analyst = object.__new__(ClaudeAnalyst)
+    analyst._paused_until = datetime.now(UTC) + timedelta(hours=1)
+    analyst.client = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock()))
+    assert asyncio.run(analyst.quick_screen("AAPL", {"price": 100})) is None
+    assert asyncio.run(analyst.deep_analysis("AAPL", {}, {}, [], {})) is None
+    analyst.client.messages.create.assert_not_awaited()
